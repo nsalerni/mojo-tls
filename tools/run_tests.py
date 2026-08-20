@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""Run every test executable in test/ (pixi's task shell has no loops).
+
+tls depends on mojo-net; its src/ path is resolved the same way as
+tools/dep_src.py: $MOJO_DEPS_DIR, .deps/ (fetch_deps.py), or a sibling
+../mojo-net checkout. Tests run from the package root so the shim and
+cert fixtures resolve at build/.
+"""
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def net_src() -> str:
+    candidates = []
+    if os.environ.get("MOJO_DEPS_DIR"):
+        candidates.append(Path(os.environ["MOJO_DEPS_DIR"]) / "mojo-net" / "src")
+    candidates.append(ROOT / ".deps" / "mojo-net" / "src")
+    candidates.append(ROOT.parent / "mojo-net" / "src")
+    for c in candidates:
+        if c.is_dir():
+            return str(c)
+    sys.exit("dependency 'mojo-net' not found; run `python3 tools/fetch_deps.py`")
+
+
+def main() -> int:
+    subprocess.run(["bash", str(ROOT / "tools" / "build_shim.sh")], check=True)
+    subprocess.run(
+        ["bash", str(ROOT / "tools" / "gen_test_certs.sh")], check=True
+    )
+    net = net_src()
+    failed = 0
+    for t in sorted((ROOT / "test").glob("test_*.mojo")):
+        try:
+            r = subprocess.run(
+                ["mojo", "run", "-I", "src", "-I", net, "-I", "test",
+                 str(t.relative_to(ROOT))],
+                cwd=ROOT, timeout=600,
+            )
+            ok = r.returncode == 0
+        except subprocess.TimeoutExpired:
+            print(f"TIMEOUT {t.name} (600s)")
+            ok = False
+        print(("PASS " if ok else "FAIL ") + t.name)
+        failed += not ok
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

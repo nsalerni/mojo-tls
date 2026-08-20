@@ -1,0 +1,26 @@
+# pixi environments
+.pixi/
+
+# build outputs (compiled shim, cert corpus, tool binaries)
+build/
+*.mojopkg
+*.conda
+*.bin
+
+# fetched source dependencies
+.deps/
+
+# editor
+.DS_Store
+.vscode/
+.idea/
+
+# local tooling notes, never published
+CLAUDE.md
+CLAUDE.local.md
+AGENTS.md
+AGENT.md
+.claude/
+.agents/
+.cursor/
+.cursorrules
