@@ -23,8 +23,8 @@ CC_BIN="${CC:-cc}"
 
 "$CC_BIN" -shared -fPIC -O2 -Wall -Werror \
   -I"$CONDA_PREFIX/include" \
-  -L"$CONDA_PREFIX/lib" -lssl -lcrypto \
+  -L"$CONDA_PREFIX/lib" \
   -Wl,-rpath,"$CONDA_PREFIX/lib" \
-  -o "$OUT" "$SRC"
+  -o "$OUT" "$SRC" -lssl -lcrypto
 
 echo "built $OUT"
