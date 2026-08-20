@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: prefix-dev/setup-pixi@v0.8.11
+        with:
+          pixi-version: latest
+          cache: true
+
+      - name: Fetch source dependencies (mojo-net)
+        run: python3 tools/fetch_deps.py
+
+      - name: Docstring coverage (mojo doc gate)
+        run: |
+          total=0
+          for f in src/tls/*.mojo; do
+            n=$(pixi run mojo doc --diagnose-missing-doc-strings -o /dev/null "$f" 2>&1 | grep -c warning || true)
+            if [ "$n" != "0" ]; then echo "MISSING DOCS: $f ($n)"; total=$((total+n)); fi
+          done
+          test "$total" = "0"
+
+      - name: Unit tests (builds the shim and cert corpus)
+        run: pixi run test
+
+      - name: Compatibility suite (differential vs CPython ssl)
+        run: pixi run compliance
+
+      - name: Upload compatibility report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compliance-report-${{ matrix.os }}
+          path: |
+            COMPLIANCE.md
+            COMPLIANCE.html

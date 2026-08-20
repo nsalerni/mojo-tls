@@ -1,0 +1,26 @@
+# mojo-tls — TLS streams for Mojo 1.0 over libssl.
+#
+# The build compiles a small C shim (shim/mojotls_shim.c) against the
+# environment's openssl; tools/build_shim.sh is idempotent and runs before
+# the test/compliance tasks. Depends on mojo-net for TCPStream and the
+# IOStream trait (sibling checkout, .deps/, or MOJO_DEPS_DIR).
+
+[workspace]
+channels = ["https://conda.modular.com/max", "conda-forge"]
+name = "mojo-tls"
+platforms = ["osx-arm64", "linux-64", "linux-aarch64"]
+version = "0.1.0"
+license = "Apache-2.0"
+preview = ["pixi-build"]
+
+[tasks]
+build-shim = "bash tools/build_shim.sh"
+gen-certs = "bash tools/gen_test_certs.sh"
+test = { cmd = "python3 tools/run_tests.py", depends-on = ["build-shim", "gen-certs"] }
+compliance = { cmd = "python3 compliance/run_compliance.py", depends-on = ["build-shim", "gen-certs"] }
+
+[dependencies]
+mojo = ">=1.0.0,<2"
+python = ">=3.11"
+openssl = ">=3"
+c-compiler = "*"
