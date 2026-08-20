@@ -50,9 +50,9 @@ def dep_path(name: str) -> Path:
     sys.exit(f"dependency '{name}' not found; run `python3 tools/fetch_deps.py`")
 
 
-def run_tool(binary: str, *args, timeout=60) -> subprocess.CompletedProcess:
+def run_tool(binary: str, *args, timeout=90) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [str(BUILD / binary), *map(str, args)],
+        [*MOJO_RUN, str(TOOLS / f"{binary}.mojo"), *map(str, args)],
         capture_output=True, text=True, timeout=timeout, cwd=ROOT,
     )
 
@@ -62,18 +62,19 @@ def setup():
     subprocess.run(["bash", str(ROOT / "tools" / "gen_test_certs.sh")], check=True)
 
 
+
+
+# Compliance tools run via `mojo run` (compile + run in one step). On the
+# conda Linux toolchain, `mojo build` of a binary that loads the shim
+# through OwnedDLHandle fails to link libdl, while `mojo run` links it
+# correctly, so the tools are invoked rather than pre-built.
+MOJO_RUN: list[str] = []
+
+
 def build_tools():
-    print("== building Mojo compliance tools ==")
+    global MOJO_RUN
     BUILD.mkdir(exist_ok=True)
-    net_src = dep_path("mojo-net")
-    for src in sorted(TOOLS.glob("*.mojo")):
-        out = BUILD / src.stem
-        subprocess.run(
-            ["mojo", "build", "-I", "src", "-I", str(net_src),
-             str(src.relative_to(ROOT)), "-o", str(out)],
-            check=True, cwd=ROOT,
-        )
-        print(f"  built {src.stem}")
+    MOJO_RUN = ["mojo", "run", "-I", "src", "-I", str(dep_path("mojo-net"))]
 
 
 # ------------------------------------------------------------------ tls ---
@@ -146,7 +147,7 @@ def section_tls():
 
     # Python verifying client, mojo server: hostname + chain + ALPN + echo.
     proc = subprocess.Popen(
-        [str(BUILD / "tls_echo_server"), str(CERTS / "server.pem"),
+        [*MOJO_RUN, str(TOOLS / "tls_echo_server.mojo"), str(CERTS / "server.pem"),
          str(CERTS / "server.key"), "h2,http/1.1"],
         stdout=subprocess.PIPE, text=True, cwd=ROOT)
     port = int(proc.stdout.readline().strip().removeprefix("PORT "))
@@ -180,7 +181,7 @@ def section_tls():
     # Rejection agreement: both sides refuse an untrusted (self-signed)
     # certificate.
     proc = subprocess.Popen(
-        [str(BUILD / "tls_echo_server"), str(CERTS / "selfsigned.pem"),
+        [*MOJO_RUN, str(TOOLS / "tls_echo_server.mojo"), str(CERTS / "selfsigned.pem"),
          str(CERTS / "selfsigned.key")],
         stdout=subprocess.PIPE, text=True, cwd=ROOT)
     port = int(proc.stdout.readline().strip().removeprefix("PORT "))
@@ -207,7 +208,7 @@ def section_tls():
 
     # Rejection agreement: hostname mismatch on a CA-signed certificate.
     proc = subprocess.Popen(
-        [str(BUILD / "tls_echo_server"), str(CERTS / "wronghost.pem"),
+        [*MOJO_RUN, str(TOOLS / "tls_echo_server.mojo"), str(CERTS / "wronghost.pem"),
          str(CERTS / "wronghost.key")],
         stdout=subprocess.PIPE, text=True, cwd=ROOT)
     port = int(proc.stdout.readline().strip().removeprefix("PORT "))
@@ -244,7 +245,7 @@ def section_tls():
                  str(CERTS / "ca.pem"), "h2", 16, timeout=60)
     mojo_sees_none = r.returncode == 0 and "ALPN \n" in r.stdout + "\n"
     proc = subprocess.Popen(
-        [str(BUILD / "tls_echo_server"), str(CERTS / "server.pem"),
+        [*MOJO_RUN, str(TOOLS / "tls_echo_server.mojo"), str(CERTS / "server.pem"),
          str(CERTS / "server.key"), "h2"],
         stdout=subprocess.PIPE, text=True, cwd=ROOT)
     port = int(proc.stdout.readline().strip().removeprefix("PORT "))
