@@ -22,9 +22,10 @@ also flattens the libssl surface into plain functions resolved with
 `dlopen`. The library is located via `$MOJO_TLS_SHIM`, then the package's
 `build/` directory, then `$CONDA_PREFIX/lib`.
 
-Blocking I/O only, matching the rest of the family: timeouts set on the
-underlying TCP stream apply (an expired read timeout surfaces as the
-typed timeout error), and a clean TLS close (close_notify) reads as EOF.
+Blocking helpers remain available. A non-blocking TCP stream can instead be
+driven through `TLSHandshake.advance()` and `TLSStream` partial I/O using a
+mojo-net `Poller`. OpenSSL's WANT_READ and WANT_WRITE states are preserved so
+the caller always watches the direction the TLS state machine actually needs.
 """
 
 from std.ffi import OwnedDLHandle, c_int
@@ -32,8 +33,13 @@ from std.os import getenv
 from std.pathlib import Path
 from std.sys import CompilationTarget
 
-from net import IOStream, TCPStream
+from net import ReadinessStream, TCPStream, WOULD_BLOCK_ERROR, is_timeout_error
 from net.libc import os_error
+
+
+comptime _WANT_READ = -2
+comptime _WANT_WRITE = -3
+comptime _SYSCALL_ERROR = -5
 
 
 def _shim_filename() -> String:
@@ -216,19 +222,51 @@ struct TLSContext(Movable):
         Raises:
             If the handshake fails, including certificate rejection.
         """
+        var handshake = self.start_connect(tcp^, sni)
+        if not handshake.advance():
+            raise Error("tls: blocking handshake requested socket readiness")
+        return handshake^.finish()
+
+    def start_connect(
+        self, var tcp: TCPStream, sni: StringSpan
+    ) raises -> TLSHandshake:
+        """Starts a client handshake that may be advanced incrementally.
+
+        The caller normally places `tcp` in non-blocking mode first. Call
+        `advance()` until it completes, watching `descriptor()` for the
+        direction reported by `wants_read()` or `wants_write()` between
+        attempts.
+
+        Args:
+            tcp: The connected stream; ownership is taken.
+            sni: Server name for SNI and hostname verification.
+
+        Returns:
+            A resumable client handshake.
+
+        Raises:
+            If the TLS session or hostname configuration fails.
+        """
         var lib = OwnedDLHandle(_shim_path())
         var ssl = lib.get_function[UInt64]("mts_ssl_new")(self._ctx, tcp.fd)
         if ssl == 0:
             raise _shim_error(lib, "tls: session creation")
         var host = String(sni)
-        var rc = lib.get_function[c_int]("mts_ssl_connect")(
+        var rc = lib.get_function[c_int]("mts_ssl_set_connect_name")(
             ssl, host.as_c_string_slice()
         )
         if Int(rc) != 0:
-            var err = _shim_error(lib, "tls: handshake failed")
+            var err = _shim_error(lib, "tls: hostname configuration")
             lib.get_function[NoneType]("mts_ssl_free")(ssl)
             raise err
-        return TLSStream(_lib=lib^, _ssl=ssl, _tcp=tcp^, _open=True)
+        return TLSHandshake(
+            _lib=lib^,
+            _ssl=ssl,
+            _tcp=tcp^,
+            _is_server=False,
+            _complete=False,
+            _open=True,
+        )
 
     def accept(self, var tcp: TCPStream) raises -> TLSStream:
         """Runs the server handshake over an accepted TCP stream.
@@ -243,16 +281,35 @@ struct TLSContext(Movable):
             If the handshake fails (bad ClientHello, no ALPN overlap,
             protocol floor not met).
         """
+        var handshake = self.start_accept(tcp^)
+        if not handshake.advance():
+            raise Error("tls: blocking handshake requested socket readiness")
+        return handshake^.finish()
+
+    def start_accept(self, var tcp: TCPStream) raises -> TLSHandshake:
+        """Starts a server handshake that may be advanced incrementally.
+
+        Args:
+            tcp: The accepted stream; ownership is taken.
+
+        Returns:
+            A resumable server handshake.
+
+        Raises:
+            If the TLS session cannot be created.
+        """
         var lib = OwnedDLHandle(_shim_path())
         var ssl = lib.get_function[UInt64]("mts_ssl_new")(self._ctx, tcp.fd)
         if ssl == 0:
             raise _shim_error(lib, "tls: session creation")
-        var rc = lib.get_function[c_int]("mts_ssl_accept")(ssl)
-        if Int(rc) != 0:
-            var err = _shim_error(lib, "tls: handshake failed")
-            lib.get_function[NoneType]("mts_ssl_free")(ssl)
-            raise err
-        return TLSStream(_lib=lib^, _ssl=ssl, _tcp=tcp^, _open=True)
+        return TLSHandshake(
+            _lib=lib^,
+            _ssl=ssl,
+            _tcp=tcp^,
+            _is_server=True,
+            _complete=False,
+            _open=True,
+        )
 
     def __deinit__(deinit self):
         """Frees the underlying SSL context."""
@@ -263,12 +320,131 @@ struct TLSContext(Movable):
 
 
 @fieldwise_init
-struct TLSStream(IOStream):
+struct TLSHandshake(Movable):
+    """A client or server TLS handshake advanced by socket readiness.
+
+    `advance()` performs one libssl handshake step. A false result is not a
+    failure: inspect `wants_read()` and `wants_write()`, wait for that
+    readiness on `descriptor()`, then call `advance()` again. Once complete,
+    `finish()` consumes the handshake and returns an established `TLSStream`.
+    """
+
+    var _lib: OwnedDLHandle
+    var _ssl: UInt64
+    var _tcp: TCPStream
+    var _is_server: Bool
+    var _complete: Bool
+    var _open: Bool
+
+    def descriptor(self) -> c_int:
+        """Returns the socket descriptor to register with `Poller`.
+
+        Returns:
+            The owned TCP descriptor.
+        """
+        return self._tcp.descriptor()
+
+    def wants_read(self) raises -> Bool:
+        """Reports whether the next handshake step needs readability.
+
+        Returns:
+            True after libssl reports WANT_READ.
+
+        Raises:
+            If the shim symbol cannot be resolved.
+        """
+        return Bool(
+            self._lib.get_function[c_int]("mts_ssl_wants_read")(self._ssl)
+        )
+
+    def wants_write(self) raises -> Bool:
+        """Reports whether the next handshake step needs writability.
+
+        Returns:
+            True after libssl reports WANT_WRITE.
+
+        Raises:
+            If the shim symbol cannot be resolved.
+        """
+        return Bool(
+            self._lib.get_function[c_int]("mts_ssl_wants_write")(self._ssl)
+        )
+
+    def is_complete(self) -> Bool:
+        """Reports whether the handshake has completed.
+
+        Returns:
+            True when `finish()` may be called.
+        """
+        return self._complete
+
+    def advance(mut self) raises -> Bool:
+        """Performs one handshake step without hiding readiness direction.
+
+        Returns:
+            True when the TLS handshake is complete, or false when the
+            descriptor must first satisfy `wants_read()` or `wants_write()`.
+
+        Raises:
+            On certificate, protocol, or transport failure.
+        """
+        if self._complete:
+            return True
+        var rc: c_int
+        if self._is_server:
+            rc = self._lib.get_function[c_int]("mts_ssl_accept")(self._ssl)
+        else:
+            rc = self._lib.get_function[c_int]("mts_ssl_connect")(self._ssl)
+        if Int(rc) == 0:
+            self._complete = True
+            return True
+        if Int(rc) == _WANT_READ:
+            return False
+        if Int(rc) == _WANT_WRITE:
+            return False
+        if Int(rc) == _SYSCALL_ERROR:
+            raise os_error("tls handshake")
+        raise _shim_error(self._lib, "tls: handshake failed")
+
+    def finish(deinit self) raises -> TLSStream:
+        """Consumes a completed handshake and returns its TLS stream.
+
+        Returns:
+            The established stream, retaining the TCP non-blocking mode.
+
+        Raises:
+            If the handshake has not completed.
+        """
+        if not self._complete:
+            if self._open:
+                self._lib.get_function[NoneType]("mts_ssl_free")(self._ssl)
+                self._tcp.close()
+            raise Error("tls: handshake is not complete")
+        return TLSStream(
+            _lib=self._lib^,
+            _ssl=self._ssl,
+            _tcp=self._tcp^,
+            _open=True,
+        )
+
+    def __deinit__(deinit self):
+        """Releases an abandoned in-progress handshake."""
+        if self._open:
+            try:
+                self._lib.get_function[NoneType]("mts_ssl_free")(self._ssl)
+            except:
+                pass
+
+
+@fieldwise_init
+struct TLSStream(ReadinessStream):
     """An established TLS session over a TCP stream.
 
-    Conforms to `IOStream`: protocol layers written against the trait run
-    over TLS unchanged. Read/write timeouts set on the underlying stream
-    apply to the TLS records carried over it.
+    Conforms to `ReadinessStream` as well as `IOStream`. On a non-blocking
+    socket, `read()` and `write_some()` raise the standard typed would-block
+    error when libssl needs readiness. Inspect `wants_read()` and
+    `wants_write()` before updating the Poller interest because either TLS
+    operation can require the opposite transport direction.
     """
 
     var _lib: OwnedDLHandle
@@ -276,18 +452,76 @@ struct TLSStream(IOStream):
     var _tcp: TCPStream
     var _open: Bool
 
+    def _raise_io_state(self, rc: Int, var context: String) raises:
+        if rc == _WANT_READ:
+            if self._tcp.nonblocking:
+                raise Error(WOULD_BLOCK_ERROR)
+            raise os_error(context^)
+        if rc == _WANT_WRITE:
+            if self._tcp.nonblocking:
+                raise Error(WOULD_BLOCK_ERROR)
+            raise os_error(context^)
+        if rc == _SYSCALL_ERROR:
+            var err = os_error(context^)
+            if self._tcp.nonblocking and is_timeout_error(err):
+                raise Error(WOULD_BLOCK_ERROR)
+            raise err
+        context += " failed"
+        raise _shim_error(self._lib, context^)
+
     def _read_some(self, mut buf: List[Byte]) raises -> Int:
         var n = self._lib.get_function[c_int]("mts_ssl_read")(
             self._ssl, buf.unsafe_ptr(), c_int(len(buf))
         )
         if Int(n) >= 0:
             return Int(n)
-        # WANT_READ/WANT_WRITE (-2/-3) surface when a socket timeout
-        # expires mid-record; SYSCALL (-5) carries a transport errno.
-        # os_error turns the pending EAGAIN into the typed timeout error.
-        if Int(n) == -2 or Int(n) == -3 or Int(n) == -5:
-            raise os_error("tls read")
-        raise _shim_error(self._lib, "tls: read failed")
+        self._raise_io_state(Int(n), "tls read")
+        return 0
+
+    def descriptor(self) -> c_int:
+        """Returns the TCP descriptor carrying this TLS session.
+
+        Returns:
+            The descriptor to register with `Poller`.
+        """
+        return self._tcp.descriptor()
+
+    def set_nonblocking(mut self, enabled: Bool) raises:
+        """Switches the underlying TCP descriptor's blocking mode.
+
+        Args:
+            enabled: True for non-blocking mode, False for blocking mode.
+
+        Raises:
+            If the descriptor flags cannot be updated.
+        """
+        self._tcp.set_nonblocking(enabled)
+
+    def wants_read(self) raises -> Bool:
+        """Reports whether the blocked TLS operation needs readability.
+
+        Returns:
+            True after libssl reports WANT_READ.
+
+        Raises:
+            If the shim symbol cannot be resolved.
+        """
+        return Bool(
+            self._lib.get_function[c_int]("mts_ssl_wants_read")(self._ssl)
+        )
+
+    def wants_write(self) raises -> Bool:
+        """Reports whether the blocked TLS operation needs writability.
+
+        Returns:
+            True after libssl reports WANT_WRITE.
+
+        Raises:
+            If the shim symbol cannot be resolved.
+        """
+        return Bool(
+            self._lib.get_function[c_int]("mts_ssl_wants_write")(self._ssl)
+        )
 
     def read(self, mut buf: List[Byte]) raises -> Int:
         """Reads up to len(buf) bytes of plaintext.
@@ -343,16 +577,34 @@ struct TLSStream(IOStream):
         """
         var sent = 0
         while sent < len(data):
-            var remaining = data[sent : len(data)]
-            var n = self._lib.get_function[c_int]("mts_ssl_write")(
-                self._ssl, remaining.unsafe_ptr(), c_int(len(remaining))
-            )
-            if Int(n) > 0:
-                sent += Int(n)
-                continue
-            if Int(n) == -2 or Int(n) == -3 or Int(n) == -5:
-                raise os_error("tls write")
-            raise _shim_error(self._lib, "tls: write failed")
+            sent += self.write_some(data[sent : len(data)])
+
+    def write_some(self, data: Span[Byte, _]) raises -> Int:
+        """Performs one partial plaintext write through libssl.
+
+        If this raises the typed would-block error, retry the same remaining
+        plaintext after waiting for the direction reported by `wants_read()`
+        or `wants_write()`.
+
+        Args:
+            data: Plaintext bytes to offer to libssl.
+
+        Returns:
+            Plaintext bytes accepted, or zero when data is empty.
+
+        Raises:
+            The typed would-block error with preserved TLS readiness state,
+            or another TLS or transport error.
+        """
+        if len(data) == 0:
+            return 0
+        var n = self._lib.get_function[c_int]("mts_ssl_write")(
+            self._ssl, data.unsafe_ptr(), c_int(len(data))
+        )
+        if Int(n) > 0:
+            return Int(n)
+        self._raise_io_state(Int(n), "tls write")
+        return 0
 
     def set_read_timeout(self, nanos: Int64) raises:
         """Bounds blocking reads via the underlying stream's timeout.

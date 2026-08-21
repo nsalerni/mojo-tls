@@ -27,6 +27,7 @@
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -34,7 +35,13 @@ typedef struct {
     SSL_CTX *ctx;
     unsigned char alpn_wire[256];
     int alpn_len;
+    atomic_int refs;
 } mts_ctx;
+
+typedef struct {
+    SSL *ssl;
+    mts_ctx *config;
+} mts_ssl;
 
 /* Server-side ALPN selection: pick the first protocol from our stored
  * list that the client offered. Fatal alert on no overlap, per RFC 7301. */
@@ -59,6 +66,7 @@ void *mts_ctx_new_client(void) {
         free(c);
         return NULL;
     }
+    atomic_init(&c->refs, 1);
     SSL_CTX_set_min_proto_version(c->ctx, TLS1_2_VERSION);
     return c;
 }
@@ -71,6 +79,7 @@ void *mts_ctx_new_server(const char *cert_chain_pem, const char *key_pem) {
         free(c);
         return NULL;
     }
+    atomic_init(&c->refs, 1);
     SSL_CTX_set_min_proto_version(c->ctx, TLS1_2_VERSION);
     if (SSL_CTX_use_certificate_chain_file(c->ctx, cert_chain_pem) != 1 ||
         SSL_CTX_use_PrivateKey_file(c->ctx, key_pem, SSL_FILETYPE_PEM) != 1 ||
@@ -122,66 +131,108 @@ int mts_ctx_set_alpn(void *p, const unsigned char *wire, int len) {
     return 0;
 }
 
-void mts_ctx_free(void *p) {
-    mts_ctx *c = (mts_ctx *)p;
+static void mts_ctx_release(mts_ctx *c) {
     if (!c) return;
+    if (atomic_fetch_sub_explicit(&c->refs, 1, memory_order_acq_rel) != 1)
+        return;
     SSL_CTX_free(c->ctx);
     free(c);
 }
 
+void mts_ctx_free(void *p) {
+    mts_ctx *c = (mts_ctx *)p;
+    mts_ctx_release(c);
+}
+
 void *mts_ssl_new(void *p, int fd) {
-    SSL *s = SSL_new(((mts_ctx *)p)->ctx);
+    mts_ctx *c = (mts_ctx *)p;
+    mts_ssl *s = calloc(1, sizeof(mts_ssl));
     if (!s) return NULL;
-    if (SSL_set_fd(s, fd) != 1) {
-        SSL_free(s);
+    s->ssl = SSL_new(c->ctx);
+    if (!s->ssl) {
+        free(s);
+        return NULL;
+    }
+    s->config = c;
+    atomic_fetch_add_explicit(&c->refs, 1, memory_order_relaxed);
+    SSL_set_mode(s->ssl, SSL_MODE_ENABLE_PARTIAL_WRITE |
+                             SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
+    if (SSL_set_fd(s->ssl, fd) != 1) {
+        SSL_free(s->ssl);
+        mts_ctx_release(c);
+        free(s);
         return NULL;
     }
     return s;
 }
 
 /* sni also enables RFC 6125 hostname verification against the peer
- * certificate; pass an empty string to skip both. */
-int mts_ssl_connect(void *s, const char *sni) {
-    SSL *ssl = (SSL *)s;
+ * certificate; pass an empty string to skip both. This is separate from
+ * SSL_connect because a resumable handshake configures the name once. */
+int mts_ssl_set_connect_name(void *s, const char *sni) {
+    SSL *ssl = ((mts_ssl *)s)->ssl;
     if (sni && sni[0]) {
-        SSL_set_tlsext_host_name(ssl, sni);
+        if (SSL_set_tlsext_host_name(ssl, sni) != 1) return -1;
         if (SSL_set1_host(ssl, sni) != 1) return -1;
     }
-    return SSL_connect(ssl) == 1 ? 0 : -1;
+    return 0;
 }
 
-int mts_ssl_accept(void *s) { return SSL_accept((SSL *)s) == 1 ? 0 : -1; }
+/* Handshake calls return 0 on completion or the negated SSL_get_error class.
+ * WANT_READ (-2) and WANT_WRITE (-3) are progress states, not failures. */
+int mts_ssl_connect(void *s) {
+    SSL *ssl = ((mts_ssl *)s)->ssl;
+    int n = SSL_connect(ssl);
+    return n == 1 ? 0 : -SSL_get_error(ssl, n);
+}
+
+int mts_ssl_accept(void *s) {
+    SSL *ssl = ((mts_ssl *)s)->ssl;
+    int n = SSL_accept(ssl);
+    return n == 1 ? 0 : -SSL_get_error(ssl, n);
+}
 
 /* Returns bytes read (> 0), 0 on clean TLS EOF (close_notify), or the
  * negated SSL_get_error class (< 0). */
 int mts_ssl_read(void *s, unsigned char *buf, int len) {
-    int n = SSL_read((SSL *)s, buf, len);
+    SSL *ssl = ((mts_ssl *)s)->ssl;
+    int n = SSL_read(ssl, buf, len);
     if (n > 0) return n;
-    int e = SSL_get_error((SSL *)s, n);
+    int e = SSL_get_error(ssl, n);
     if (e == SSL_ERROR_ZERO_RETURN) return 0;
     return -e;
 }
 
 /* Returns bytes written (> 0) or the negated SSL_get_error class. */
 int mts_ssl_write(void *s, const unsigned char *buf, int len) {
-    int n = SSL_write((SSL *)s, buf, len);
+    SSL *ssl = ((mts_ssl *)s)->ssl;
+    int n = SSL_write(ssl, buf, len);
     if (n > 0) return n;
-    return -SSL_get_error((SSL *)s, n);
+    return -SSL_get_error(ssl, n);
+}
+
+int mts_ssl_wants_read(void *s) {
+    return SSL_want_read(((mts_ssl *)s)->ssl);
+}
+
+int mts_ssl_wants_write(void *s) {
+    return SSL_want_write(((mts_ssl *)s)->ssl);
 }
 
 /* Copies the negotiated ALPN protocol into buf; returns its length, or 0
  * when nothing was negotiated. */
 int mts_ssl_get_alpn(void *s, unsigned char *buf, int cap) {
+    SSL *ssl = ((mts_ssl *)s)->ssl;
     const unsigned char *d = NULL;
     unsigned int l = 0;
-    SSL_get0_alpn_selected((SSL *)s, &d, &l);
+    SSL_get0_alpn_selected(ssl, &d, &l);
     if (!d || (int)l > cap) return 0;
     memcpy(buf, d, l);
     return (int)l;
 }
 
 int mts_ssl_version(void *s, char *buf, int cap) {
-    const char *v = SSL_get_version((SSL *)s);
+    const char *v = SSL_get_version(((mts_ssl *)s)->ssl);
     int l = (int)strlen(v);
     if (l >= cap) l = cap - 1;
     memcpy(buf, v, (size_t)l);
@@ -190,12 +241,20 @@ int mts_ssl_version(void *s, char *buf, int cap) {
 }
 
 long mts_ssl_verify_result(void *s) {
-    return SSL_get_verify_result((SSL *)s);
+    return SSL_get_verify_result(((mts_ssl *)s)->ssl);
 }
 
-int mts_ssl_shutdown(void *s) { return SSL_shutdown((SSL *)s); }
+int mts_ssl_shutdown(void *s) {
+    return SSL_shutdown(((mts_ssl *)s)->ssl);
+}
 
-void mts_ssl_free(void *s) { SSL_free((SSL *)s); }
+void mts_ssl_free(void *p) {
+    mts_ssl *s = (mts_ssl *)p;
+    if (!s) return;
+    SSL_free(s->ssl);
+    mts_ctx_release(s->config);
+    free(s);
+}
 
 /* Pops one entry from the thread's OpenSSL error queue into buf. */
 int mts_last_error(char *buf, int cap) {

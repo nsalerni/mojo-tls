@@ -21,6 +21,7 @@ import ssl
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -117,6 +118,73 @@ def py_echo_server(ctx, results: dict):
     return t
 
 
+def py_receive_then_echo(ctx, size: int, results: dict):
+    """Receives a complete payload before echoing it through CPython TLS."""
+    lsock = socket.socket()
+    lsock.bind(("127.0.0.1", 0))
+    lsock.listen(1)
+    results["port"] = lsock.getsockname()[1]
+    results["ready"].set()
+
+    def serve():
+        try:
+            conn, _ = lsock.accept()
+            conn.settimeout(30)
+            tls = ctx.wrap_socket(conn, server_side=True)
+            results["version"] = tls.version()
+            results["alpn"] = tls.selected_alpn_protocol()
+            received = bytearray()
+            while len(received) < size:
+                chunk = tls.recv(min(16384, size - len(received)))
+                if not chunk:
+                    break
+                received.extend(chunk)
+            results["bytes"] = len(received)
+            results["payload_ok"] = all(
+                byte == (index * 17 + 11) % 256
+                for index, byte in enumerate(received)
+            )
+            for offset in range(0, len(received), 16384):
+                tls.sendall(received[offset : offset + 16384])
+            tls.close()
+        except Exception as error:
+            results["error"] = repr(error)
+        finally:
+            lsock.close()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    return thread
+
+
+def py_stalled_tls_server(ctx, results: dict):
+    """Completes a handshake, then leaves application bytes unread."""
+    lsock = socket.socket()
+    lsock.bind(("127.0.0.1", 0))
+    lsock.listen(1)
+    results["port"] = lsock.getsockname()[1]
+    results["ready"].set()
+
+    def serve():
+        try:
+            conn, _ = lsock.accept()
+            conn.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 32768)
+            conn.settimeout(10)
+            tls = ctx.wrap_socket(conn, server_side=True)
+            results["version"] = tls.version()
+            results["alpn"] = tls.selected_alpn_protocol()
+            time.sleep(30.0)
+            tls.close()
+        except Exception as error:
+            results["error"] = repr(error)
+        finally:
+            lsock.close()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    return thread
+
+
 def section_tls():
     print("== tls vs CPython ssl ==")
     n = 262_144
@@ -197,10 +265,17 @@ def section_tls():
     finally:
         proc.kill(); proc.wait()
     res = {"ready": threading.Event()}
-    t = py_echo_server(py_server_ctx("selfsigned.pem", "selfsigned.key"), res)
+    t = py_echo_server(
+        py_server_ctx("selfsigned.pem", "selfsigned.key", ["h2"]), res
+    )
     res["ready"].wait(10)
-    r = run_tool("tls_probe_client", res["port"], "localhost",
-                 str(CERTS / "ca.pem"), "-", 16, timeout=60)
+    r = run_tool(
+        "tls_nonblocking_client",
+        res["port"],
+        str(CERTS / "ca.pem"),
+        16,
+        timeout=60,
+    )
     mojo_rejected = r.returncode != 0 and "handshake" in (r.stderr + r.stdout)
     record("tls", "both reject an untrusted (self-signed) certificate",
            py_rejected and mojo_rejected,
@@ -224,10 +299,17 @@ def section_tls():
     finally:
         proc.kill(); proc.wait()
     res = {"ready": threading.Event()}
-    t = py_echo_server(py_server_ctx("wronghost.pem", "wronghost.key"), res)
+    t = py_echo_server(
+        py_server_ctx("wronghost.pem", "wronghost.key", ["h2"]), res
+    )
     res["ready"].wait(10)
-    r = run_tool("tls_probe_client", res["port"], "localhost",
-                 str(CERTS / "ca.pem"), "-", 16, timeout=60)
+    r = run_tool(
+        "tls_nonblocking_client",
+        res["port"],
+        str(CERTS / "ca.pem"),
+        16,
+        timeout=60,
+    )
     mojo_rejected = r.returncode != 0 and "handshake" in (r.stderr + r.stdout)
     record("tls", "both reject a hostname mismatch on a CA-signed certificate",
            py_rejected and mojo_rejected,
@@ -264,6 +346,112 @@ def section_tls():
     record("tls", "ALPN no overlap: our server alerts fatally, our client tolerates a server that proceeds without",
            mojo_sees_none and py_rejected,
            f"mojo_client_no_alpn={mojo_sees_none} python_client_saw_alert={py_rejected} out={r.stdout.strip()!r}")
+
+    # Readiness-driven Mojo client against a CPython TLS peer that receives
+    # the complete payload before echoing it.
+    readiness_size = 8 * 1024 * 1024
+    res = {"ready": threading.Event()}
+    t = py_receive_then_echo(
+        py_server_ctx("server.pem", "server.key", ["h2"]),
+        readiness_size,
+        res,
+    )
+    res["ready"].wait(10)
+    r = run_tool(
+        "tls_nonblocking_client",
+        res["port"],
+        str(CERTS / "ca.pem"),
+        readiness_size,
+        timeout=120,
+    )
+    t.join(timeout=30)
+    values = None
+    parts = r.stdout.split()
+    if r.returncode == 0 and len(parts) == 9 and parts[0] == "OK":
+        try:
+            values = tuple(map(int, parts[1:]))
+        except ValueError:
+            pass
+    detail = f"out={r.stdout.strip()!r} peer={res} err={r.stderr[:150]!r}"
+    handshake_ok = (
+        values is not None
+        and values[4] > 0
+        and res.get("version", "").startswith("TLSv1.")
+        and res.get("alpn") == "h2"
+        and "error" not in res
+    )
+    record(
+        "tls",
+        "resumable Mojo handshake matches CPython TLS and ALPN",
+        handshake_ok,
+        detail,
+    )
+    write_ok = (
+        values is not None
+        and values[0] == readiness_size
+        and values[2] > 1
+        and res.get("bytes") == readiness_size
+        and res.get("payload_ok") is True
+    )
+    record(
+        "tls",
+        "partial Mojo TLS writes match CPython",
+        write_ok,
+        detail,
+    )
+    read_ok = (
+        values is not None
+        and values[1] == readiness_size
+        and values[3] > 1
+        and values[6] > 0
+        and res.get("payload_ok") is True
+    )
+    record(
+        "tls",
+        "partial Mojo TLS reads preserve WANT_READ against CPython",
+        read_ok,
+        detail,
+    )
+
+    # A distinct CPython peer completes TLS but deliberately leaves all
+    # application data unread. The Mojo client must stop at WANT_WRITE before
+    # its finite 32 MiB bound rather than blocking or inventing progress.
+    pressure_size = 32 * 1024 * 1024
+    pressure = {"ready": threading.Event()}
+    t = py_stalled_tls_server(
+        py_server_ctx("server.pem", "server.key", ["h2"]), pressure
+    )
+    pressure["ready"].wait(10)
+    r = run_tool(
+        "tls_nonblocking_client",
+        pressure["port"],
+        str(CERTS / "ca.pem"),
+        pressure_size,
+        "backpressure",
+        timeout=60,
+    )
+    t.join(timeout=0.1)
+    blocked = None
+    parts = r.stdout.split()
+    if r.returncode == 0 and len(parts) == 5 and parts[0] == "BLOCKED":
+        try:
+            blocked = tuple(map(int, parts[1:]))
+        except ValueError:
+            pass
+    pressure_ok = (
+        blocked is not None
+        and 0 < blocked[0] < pressure_size
+        and blocked[1] > 0
+        and blocked[2] > 0
+        and pressure.get("version", "").startswith("TLSv1.")
+        and pressure.get("alpn") == "h2"
+    )
+    record(
+        "tls",
+        "Mojo TLS write preserves WANT_WRITE under CPython backpressure",
+        pressure_ok,
+        f"out={r.stdout.strip()!r} peer={pressure} err={r.stderr[:150]!r}",
+    )
 
 
 HTML_REPORT = ROOT / "COMPLIANCE.html"
@@ -346,11 +534,10 @@ HTML_THESIS = (
 HTML_GAPS = [
     ("Client certificates (mTLS)", "not exposed yet; the shim and libssl support it, the API does not."),
     ("Session resumption", "every connection is a full handshake for now."),
-    ("Non-blocking TLS", "blocking I/O only, like the rest of the family; the Poller integration comes with the async story."),
 ]
 HTML_SECTIONS = {
     "tls": ("`tls` vs CPython `ssl`",
-            "Live connections with CPython's ssl module as the peer in both roles: TLS 1.3 and 1.2 negotiation, ALPN agreement and fatal-alert on no overlap, chain and hostname verification, bulk transfer through the record layer, and a bad-certificate corpus (self-signed, wrong hostname) that both implementations must reject."),
+            "Live connections with CPython's ssl module as the peer in both roles: TLS 1.3 and 1.2 negotiation, ALPN agreement and fatal-alert on no overlap, chain and hostname verification, bulk and readiness-driven transfer through the record layer, and a bad-certificate corpus (self-signed, wrong hostname) that both implementations must reject."),
 }
 
 
