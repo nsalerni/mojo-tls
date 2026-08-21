@@ -8,12 +8,12 @@
 #     http://www.apache.org/licenses/LICENSE-2.0
 # ===----------------------------------------------------------------------=== #
 
-"""TLS for Mojo 1.0: `TLSContext` + `TLSStream` over libssl.
+"""TLS for Mojo 1.0 over libssl.
 
 Client and server handshakes, SNI with hostname verification, ALPN on
 both roles, and trust-store or custom-CA verification, wrapped around
-mojo-net's `TCPStream`. `TLSStream` conforms to the `IOStream` trait, so
-protocol layers written against it (HTTP/2, gRPC) run over TLS unchanged.
+mojo-net's `TCPStream`. `TLSHandshake` supports readiness-driven progress,
+and `TLSStream` conforms to `ReadinessStream` as well as `IOStream`.
 
 Example (client):
 
@@ -29,4 +29,4 @@ def main() raises:
 ```
 """
 
-from .tls import TLSContext, TLSStream
+from .tls import TLSContext, TLSHandshake, TLSStream

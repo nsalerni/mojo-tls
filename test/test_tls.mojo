@@ -1,12 +1,19 @@
-# TLS tests with both endpoints in Mojo: the server side runs in a forked
-# child (a blocking handshake needs both peers making progress, which one
-# thread cannot do). Covers the handshake, ALPN, certificate verification
-# against the test corpus, typed timeouts through TLS, and clean EOF.
+# TLS tests with both endpoints in Mojo. Blocking servers run in forked
+# children, while the readiness test drives both endpoints on one Poller.
+# Covers handshakes, ALPN, certificate verification, timeouts, partial I/O,
+# typed WANT_READ and WANT_WRITE states, and clean EOF.
 
 from std.ffi import c_int, external_call
 from std.testing import assert_equal, assert_true
 
-from net import TCPListener, TCPStream, is_timeout_error
+from net import (
+    Poller,
+    ReadinessStream,
+    TCPListener,
+    TCPStream,
+    is_timeout_error,
+    is_would_block,
+)
 from tls import TLSContext
 
 
@@ -180,6 +187,131 @@ def test_read_timeout_through_tls() raises:
     reap(server[1])
 
 
+def accepts_readiness_stream[S: ReadinessStream](stream: S):
+    """Compile-time proof that TLSStream satisfies the readiness trait."""
+    _ = stream
+
+
+def test_nonblocking_handshake_and_partial_io() raises:
+    var listener = TCPListener("127.0.0.1", 0)
+    var client_tcp = TCPStream.connect("127.0.0.1", listener.local_port)
+    var server_tcp = listener.accept()
+    listener.close()
+    client_tcp.set_nonblocking(True)
+    server_tcp.set_nonblocking(True)
+
+    var client_ctx = TLSContext.client(ca_file=String(CA), alpn=["h2"])
+    var server_ctx = TLSContext.server(
+        String(SERVER_CERT), String(SERVER_KEY), alpn=["h2"]
+    )
+    var client_hs = client_ctx.start_connect(client_tcp^, "localhost")
+    var server_hs = server_ctx.start_accept(server_tcp^)
+
+    var client_done = client_hs.advance()
+    var server_done = server_hs.advance()
+    assert_true(
+        client_done or client_hs.wants_read() or client_hs.wants_write()
+    )
+    assert_true(
+        server_done or server_hs.wants_read() or server_hs.wants_write()
+    )
+
+    var poller = Poller()
+    if not client_done:
+        poller.register(
+            client_hs.descriptor(),
+            readable=client_hs.wants_read(),
+            writable=client_hs.wants_write(),
+        )
+    if not server_done:
+        poller.register(
+            server_hs.descriptor(),
+            readable=server_hs.wants_read(),
+            writable=server_hs.wants_write(),
+        )
+
+    var steps = 0
+    while not client_done or not server_done:
+        steps += 1
+        assert_true(steps < 100, "non-blocking handshake must converge")
+        var events = poller.wait(2000)
+        assert_true(len(events) > 0, "handshake descriptor becomes ready")
+        for event in events:
+            if not client_done and event.fd == client_hs.descriptor():
+                if (
+                    (client_hs.wants_read() and event.readable)
+                    or (client_hs.wants_write() and event.writable)
+                    or event.error
+                    or event.hangup
+                ):
+                    client_done = client_hs.advance()
+                    if client_done:
+                        poller.unregister(client_hs.descriptor())
+                    else:
+                        poller.modify(
+                            client_hs.descriptor(),
+                            readable=client_hs.wants_read(),
+                            writable=client_hs.wants_write(),
+                        )
+            if not server_done and event.fd == server_hs.descriptor():
+                if (
+                    (server_hs.wants_read() and event.readable)
+                    or (server_hs.wants_write() and event.writable)
+                    or event.error
+                    or event.hangup
+                ):
+                    server_done = server_hs.advance()
+                    if server_done:
+                        poller.unregister(server_hs.descriptor())
+                    else:
+                        poller.modify(
+                            server_hs.descriptor(),
+                            readable=server_hs.wants_read(),
+                            writable=server_hs.wants_write(),
+                        )
+    poller.close()
+
+    var client = client_hs^.finish()
+    var server = server_hs^.finish()
+    accepts_readiness_stream(client)
+    accepts_readiness_stream(server)
+    assert_equal(client.negotiated_alpn(), "h2")
+    assert_equal(server.negotiated_alpn(), "h2")
+
+    var empty = List[Byte](length=1, fill=0)
+    var blocked = False
+    try:
+        _ = server.read(empty)
+    except error:
+        blocked = True
+        assert_true(is_would_block(error), String(error))
+        assert_true(server.wants_read())
+        assert_true(not server.wants_write())
+    assert_true(blocked, "empty TLS read reports WANT_READ")
+
+    var payload = List[Byte](length=8 * 1024 * 1024, fill=0x5A)
+    var sent = 0
+    var writes = 0
+    blocked = False
+    while sent < len(payload):
+        try:
+            var n = client.write_some(Span(payload)[sent : len(payload)])
+            assert_true(n > 0)
+            sent += n
+            writes += 1
+        except error:
+            assert_true(is_would_block(error), String(error))
+            assert_true(client.wants_write())
+            assert_true(not client.wants_read())
+            blocked = True
+            break
+    assert_true(writes > 1, "partial TLS writes expose bounded progress")
+    assert_true(blocked, "stalled TLS peer produces WANT_WRITE")
+
+    client.close()
+    server.close()
+
+
 def test_bad_cert_paths() raises:
     var raised = False
     try:
@@ -200,5 +332,6 @@ def main() raises:
     test_verify_disabled_accepts_selfsigned()
     test_alpn_no_overlap_fails()
     test_read_timeout_through_tls()
+    test_nonblocking_handshake_and_partial_io()
     test_bad_cert_paths()
     print("test_tls: all tests passed")

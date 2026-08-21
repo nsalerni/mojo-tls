@@ -8,8 +8,9 @@
 TLS for **Mojo 1.0**: client and server handshakes, SNI with hostname
 verification, ALPN on both roles, and strict certificate verification,
 wrapped around [mojo-net](https://github.com/nsalerni/mojo-net)'s
-`TCPStream`. `TLSStream` conforms to the `IOStream` trait, so protocol
-layers written against it (HTTP/2, gRPC) run over TLS unchanged.
+`TCPStream`. `TLSStream` conforms to both `IOStream` and `ReadinessStream`,
+so protocol layers can use blocking helpers or drive partial encrypted I/O
+with the same Poller used for plain sockets.
 
 ```mojo
 from net import TCPStream
@@ -27,13 +28,19 @@ def main() raises:
 The protocol logic everywhere else in this family is pure Mojo; the
 cryptography deliberately is not. Nobody serious reimplements TLS, so
 mojo-tls binds libssl (from the conda-forge `openssl` package) through a
-small C shim (`shim/mojotls_shim.c`, about two hundred lines) that exists
-for one structural reason: OpenSSL's server-side ALPN selection runs
-through a C callback, which Mojo cannot provide. The shim hosts that
+small C shim (`shim/mojotls_shim.c`). OpenSSL's server-side ALPN selection
+requires a C callback, which Mojo cannot provide. The shim hosts that
 callback and flattens the context/handshake/read/write surface into plain
 functions loaded with `dlopen`. `tools/build_shim.sh` compiles it with
 the environment's C compiler; the test and compliance tasks run it
 automatically.
+
+For event loops, set the TCP stream non-blocking and use
+`TLSContext.start_connect()` or `start_accept()`. Each
+`TLSHandshake.advance()` call either completes or reports whether libssl needs
+readability or writability. The finished `TLSStream` preserves the same
+direction through `wants_read()` and `wants_write()` whenever `read()` or
+`write_some()` raises the typed would-block error.
 
 Verification is strict by default, matching modern CPython: full chain
 validation with X.509 strict checks, and RFC 6125 hostname verification
@@ -52,6 +59,8 @@ other end of the connection, in both roles:
 - chain and hostname verification, with a generated bad-certificate
   corpus (self-signed, wrong hostname) that both implementations must
   reject for the same reasons
+- resumable handshakes, an 8 MiB partial-I/O exchange, and a bounded
+  WANT_WRITE backpressure probe against CPython TLS peers
 
 Current results: [COMPLIANCE.md](COMPLIANCE.md).
 
@@ -64,8 +73,8 @@ pixi run compliance           # differential vs CPython ssl; rewrites COMPLIANCE
 ## Status
 
 Built for [grpc-mojo](https://github.com/nsalerni/grpc-mojo), where it
-will carry gRPC over TLS. Not here yet: client certificates (mTLS),
-session resumption, and non-blocking TLS; see [ROADMAP.md](ROADMAP.md).
+will carry gRPC over TLS. Not here yet: client certificates (mTLS) and
+session resumption; see [ROADMAP.md](ROADMAP.md).
 
 ## License
 

@@ -18,12 +18,12 @@ TLS 1.3 session tickets, so reconnecting clients skip a round trip.
 Verified by CPython session-reuse checks (`session_reused` on the
 reference side) and handshake-count assertions.
 
-## 3. Non-blocking TLS
+## Completed foundation
 
-`TLSStream` over a non-blocking `TCPStream`, surfacing the typed
-would-block error so mojo-net's `Poller` can drive TLS connections in an
-event loop. This is what a concurrent TLS server needs. Verified by the
-same readiness differentials mojo-net uses, run through the TLS layer.
+`TLSHandshake` advances client and server handshakes one readiness event at a
+time. `TLSStream` implements mojo-net's `ReadinessStream`, preserving
+WANT_READ and WANT_WRITE so a Poller can drive encrypted partial I/O. CPython
+peers verify a full 8 MiB exchange and bounded backpressure behavior.
 
 ## Deliberate scope
 

@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Added readiness-driven client and server handshakes that preserve libssl's
+  WANT_READ and WANT_WRITE progress states.
+- Made `TLSStream` conform to `ReadinessStream` with partial encrypted reads
+  and writes while keeping the blocking `IOStream` API compatible.
+- Added bounded non-blocking transfer and backpressure differentials against
+  CPython TLS peers.
+
 ## 0.2.0 - 2026-08-21
 
 - Ships the compiled Mojo module and native OpenSSL shim in one package.
