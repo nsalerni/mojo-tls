@@ -11,7 +11,7 @@ monorepo layout, so every include path keeps working; mojo-http2 uses
 
 Already-present directories are left untouched — a monorepo-style checkout
 or a developer's own clone always wins over a fresh fetch. Use --update to
-fast-forward previously fetched clones to their pinned ref.
+move previously fetched clones to their pinned ref.
 
 URL selection: $GIT_URL_TEMPLATE (default
 "https://github.com/nsalerni/{name}.git", which works anonymously for
@@ -28,6 +28,79 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_TEMPLATE = "https://github.com/nsalerni/{name}.git"
+
+
+def remote_ref_type(dest: Path, ref: str) -> str:
+    tag_ref = f"refs/tags/{ref}"
+    branch_ref = f"refs/heads/{ref}"
+    result = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(dest),
+            "ls-remote",
+            "--exit-code",
+            "--refs",
+            "origin",
+            tag_ref,
+            branch_ref,
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    if result.returncode not in (0, 2):
+        result.check_returncode()
+    remote_refs = {
+        line.split(maxsplit=1)[1] for line in result.stdout.splitlines() if line.strip()
+    }
+    if tag_ref in remote_refs:
+        return "tag"
+    if branch_ref in remote_refs:
+        return "branch"
+    raise ValueError(f"origin has no exact tag or branch named '{ref}'")
+
+
+def update_clone(dest: Path, ref: str) -> None:
+    ref_type = remote_ref_type(dest, ref)
+    if ref_type == "tag":
+        tag_ref = f"refs/tags/{ref}"
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(dest),
+                "fetch",
+                "--depth",
+                "1",
+                "origin",
+                f"{tag_ref}:{tag_ref}",
+            ],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(dest), "checkout", "--detach", ref],
+            check=True,
+        )
+        return
+
+    remote_branch = f"refs/remotes/origin/{ref}"
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(dest),
+            "fetch",
+            "--depth",
+            "1",
+            "origin",
+            f"+refs/heads/{ref}:{remote_branch}",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(dest), "checkout", "-B", ref, f"origin/{ref}"],
+        check=True,
+    )
 
 
 def main() -> int:
@@ -48,12 +121,11 @@ def main() -> int:
             if not update:
                 print(f"  {name}: already present at {dest} (skipped)")
                 continue
-            subprocess.run(["git", "-C", str(dest), "fetch", "origin", ref], check=True)
-            subprocess.run(["git", "-C", str(dest), "checkout", ref], check=True)
-            subprocess.run(
-                ["git", "-C", str(dest), "pull", "--ff-only", "origin", ref],
-                check=False,
-            )
+            try:
+                update_clone(dest, ref)
+            except ValueError as error:
+                print(f"  {name}: {error}", file=sys.stderr)
+                return 1
             print(f"  {name}: updated to {ref}")
             continue
         url = dep.get("url") or template.format(name=name)
