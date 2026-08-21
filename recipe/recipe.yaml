@@ -42,6 +42,7 @@ build:
               -Wl,-soname,libmojotls.so \
               -o "${PREFIX}/lib/libmojotls.so" \
               shim/mojotls_shim.c -lssl -lcrypto
+            patchelf --set-rpath '$ORIGIN' "${PREFIX}/lib/libmojotls.so"
             ;;
         esac
 
@@ -52,6 +53,8 @@ requirements:
   build:
     - ${{ compiler('c') }}
     - mojo-compiler ${{ mojo_version }}
+    - if: linux
+      then: patchelf
   host:
     - mojo-compiler ${{ mojo_version }}
     - mojo-net ${{ mojo_net_version }}
@@ -78,7 +81,9 @@ tests:
             Darwin)
               SHIM="${PREFIX}/lib/libmojotls.dylib"
               test -f "${SHIM}"
-              otool -l "${SHIM}" | grep -A2 LC_RPATH | grep -F '@loader_path'
+              RPATHS="$(otool -l "${SHIM}" | awk \
+                '$1 == "cmd" && $2 == "LC_RPATH" { getline; getline; print $2 }')"
+              test "${RPATHS}" = '@loader_path'
               otool -D "${SHIM}" | grep -F '@rpath/libmojotls.dylib'
               otool -L "${SHIM}" | grep -F '@rpath/libssl.3.dylib'
               otool -L "${SHIM}" | grep -F '@rpath/libcrypto.3.dylib'
@@ -86,7 +91,8 @@ tests:
             *)
               SHIM="${PREFIX}/lib/libmojotls.so"
               test -f "${SHIM}"
-              readelf -d "${SHIM}" | grep -E '(RPATH|RUNPATH)' | grep -F '$ORIGIN'
+              readelf -d "${SHIM}" | \
+                grep -E '\((RPATH|RUNPATH)\).*\[\$ORIGIN\]$'
               readelf -d "${SHIM}" | grep -F '(SONAME)' | grep -F 'libmojotls.so'
               readelf -d "${SHIM}" | grep -F '(NEEDED)' | grep -F 'libssl.so.3'
               readelf -d "${SHIM}" | grep -F '(NEEDED)' | grep -F 'libcrypto.so.3'
@@ -115,11 +121,22 @@ tests:
             -out "${WORK}/server.pem" -days 1 >/dev/null 2>&1
 
           SMOKE="${PWD}/tests/package_smoke.mojo"
+          MOJO="${PREFIX}/bin/mojo"
+          test -x "${MOJO}"
           cd "${WORK}"
+          export CONDA_PREFIX="${PREFIX}"
+          export MODULAR_HOME="${PREFIX}/share/max"
+          export PATH="${PREFIX}/bin:${PATH}"
           unset MOJO_TLS_SHIM
           test -z "${MOJO_TLS_SHIM:-}"
-          mojo build "${SMOKE}" -o package_smoke
-          ./package_smoke ca.pem server.pem server.key
+          if [ "$(uname -s)" = Linux ]; then
+            "${MOJO}" build --emit object "${SMOKE}" -o package_smoke.o
+            test -s package_smoke.o
+            "${MOJO}" run "${SMOKE}" ca.pem server.pem server.key
+          else
+            "${MOJO}" build "${SMOKE}" -o package_smoke
+            ./package_smoke ca.pem server.pem server.key
+          fi
     files:
       recipe:
         - tests/package_smoke.mojo
