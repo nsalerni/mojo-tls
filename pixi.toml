@@ -1,4 +1,4 @@
-# mojo-tls — TLS streams for Mojo 1.0 over libssl.
+# mojo-tls: TLS streams for Mojo 1.0 over libssl.
 #
 # The build compiles a small C shim (shim/mojotls_shim.c) against the
 # environment's openssl; tools/build_shim.sh is idempotent and runs before
@@ -18,9 +18,17 @@ build-shim = "bash tools/build_shim.sh"
 gen-certs = "bash tools/gen_test_certs.sh"
 test = { cmd = "python3 tools/run_tests.py", depends-on = ["build-shim", "gen-certs"] }
 compliance = { cmd = "python3 compliance/run_compliance.py", depends-on = ["build-shim", "gen-certs"] }
+package-test = "python3 packaging/test_installed_package.py"
 
 [dependencies]
 mojo = ">=1.0.0,<2"
 python = ">=3.11"
 openssl = ">=3"
 c-compiler = "*"
+
+[package]
+name = "mojo-tls"
+version = "0.1.0"
+
+[package.build]
+backend = { name = "pixi-build-rattler-build", version = "0.*" }
