@@ -23,6 +23,9 @@ jobs:
           pixi-version: latest
           cache: true
 
+      - name: Dependency fetcher tests
+        run: python3 -B tools/test_fetch_deps.py
+
       - name: Fetch source dependencies (mojo-net)
         run: python3 tools/fetch_deps.py
 
