@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.1 - 2026-08-21
+
 - Added readiness-driven client and server handshakes that preserve libssl's
   WANT_READ and WANT_WRITE progress states.
 - Made `TLSStream` conform to `ReadinessStream` with partial encrypted reads
