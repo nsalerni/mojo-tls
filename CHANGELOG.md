@@ -1,6 +1,14 @@
 # Changelog
 
-## 0.1.0 — 2026-08-21
+## 0.2.0 - 2026-08-21
+
+- Ships the compiled Mojo module and native OpenSSL shim in one package.
+- Uses exact relative loader paths on macOS and Linux, with strict Mojo 1.0,
+  mojo-net 0.2, and OpenSSL 3 dependency ranges.
+- Tests the installed artifact with CA and hostname verification, `h2` ALPN,
+  and an encrypted echo on both supported CI platforms.
+
+## 0.1.0 - 2026-08-21
 
 Initial release.
 
