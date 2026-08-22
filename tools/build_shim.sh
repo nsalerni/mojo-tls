@@ -9,8 +9,14 @@ SRC="$ROOT/shim/mojotls_shim.c"
 mkdir -p "$ROOT/build"
 
 case "$(uname -s)" in
-  Darwin) OUT="$ROOT/build/libmojotls.dylib" ;;
-  *)      OUT="$ROOT/build/libmojotls.so" ;;
+  Darwin)
+    OUT="$ROOT/build/libmojotls.dylib"
+    THREAD_FLAG=""
+    ;;
+  *)
+    OUT="$ROOT/build/libmojotls.so"
+    THREAD_FLAG="-pthread"
+    ;;
 esac
 
 if [ -f "$OUT" ] && [ "$OUT" -nt "$SRC" ]; then
@@ -21,7 +27,7 @@ fi
 : "${CONDA_PREFIX:?run inside the pixi environment (pixi run ...)}"
 CC_BIN="${CC:-cc}"
 
-"$CC_BIN" -shared -fPIC -O2 -Wall -Werror \
+"$CC_BIN" -shared -fPIC -O2 -Wall -Werror ${THREAD_FLAG:+"$THREAD_FLAG"} \
   -I"$CONDA_PREFIX/include" \
   -L"$CONDA_PREFIX/lib" \
   -Wl,-rpath,"$CONDA_PREFIX/lib" \

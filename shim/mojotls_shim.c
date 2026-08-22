@@ -27,9 +27,16 @@
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
+#include <errno.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef __linux__
+#include <pthread.h>
+#include <signal.h>
+#include <time.h>
+#endif
 
 typedef struct {
     SSL_CTX *ctx;
@@ -42,6 +49,70 @@ typedef struct {
     SSL *ssl;
     mts_ctx *config;
 } mts_ssl;
+
+/* OpenSSL's socket BIO uses write(2), so a peer reset can raise SIGPIPE on
+ * Linux before libssl returns SSL_ERROR_SYSCALL. Block the signal only on
+ * the calling thread and consume it only when this operation created it.
+ * This preserves the application's process-wide signal policy. */
+#ifdef __linux__
+typedef struct {
+    sigset_t blocked;
+    sigset_t previous_mask;
+    int active;
+    int was_pending;
+} mts_sigpipe_guard;
+
+static int mts_sigpipe_guard_begin(mts_sigpipe_guard *guard) {
+    memset(guard, 0, sizeof(*guard));
+    sigemptyset(&guard->blocked);
+    sigaddset(&guard->blocked, SIGPIPE);
+
+    int error = pthread_sigmask(SIG_BLOCK, &guard->blocked,
+                                &guard->previous_mask);
+    if (error != 0) {
+        errno = error;
+        return -1;
+    }
+    guard->active = 1;
+
+    sigset_t pending;
+    if (sigpending(&pending) != 0) {
+        error = errno;
+        pthread_sigmask(SIG_SETMASK, &guard->previous_mask, NULL);
+        guard->active = 0;
+        errno = error;
+        return -1;
+    }
+    guard->was_pending = sigismember(&pending, SIGPIPE) == 1;
+    return 0;
+}
+
+static void mts_sigpipe_guard_end(mts_sigpipe_guard *guard, int io_errno) {
+    if (!guard->active) return;
+
+    if (io_errno == EPIPE && !guard->was_pending) {
+        struct timespec no_wait = {0, 0};
+        (void)sigtimedwait(&guard->blocked, NULL, &no_wait);
+    }
+    (void)pthread_sigmask(SIG_SETMASK, &guard->previous_mask, NULL);
+    guard->active = 0;
+    errno = io_errno;
+}
+#else
+typedef struct {
+    int unused;
+} mts_sigpipe_guard;
+
+static int mts_sigpipe_guard_begin(mts_sigpipe_guard *guard) {
+    (void)guard;
+    return 0;
+}
+
+static void mts_sigpipe_guard_end(mts_sigpipe_guard *guard, int io_errno) {
+    (void)guard;
+    errno = io_errno;
+}
+#endif
 
 /* Server-side ALPN selection: pick the first protocol from our stored
  * list that the client offered. Fatal alert on no overlap, per RFC 7301. */
@@ -183,37 +254,63 @@ int mts_ssl_set_connect_name(void *s, const char *sni) {
  * error class. WANT_READ (-2) and WANT_WRITE (-3) are progress states. */
 int mts_ssl_connect(void *s) {
     SSL *ssl = ((mts_ssl *)s)->ssl;
+    mts_sigpipe_guard guard;
+    if (mts_sigpipe_guard_begin(&guard) != 0) return -SSL_ERROR_SYSCALL;
     ERR_clear_error();
+    errno = 0;
     int n = SSL_connect(ssl);
-    return n == 1 ? 0 : -SSL_get_error(ssl, n);
+    int io_errno = errno;
+    int result = n == 1 ? 0 : -SSL_get_error(ssl, n);
+    mts_sigpipe_guard_end(&guard, io_errno);
+    return result;
 }
 
 int mts_ssl_accept(void *s) {
     SSL *ssl = ((mts_ssl *)s)->ssl;
+    mts_sigpipe_guard guard;
+    if (mts_sigpipe_guard_begin(&guard) != 0) return -SSL_ERROR_SYSCALL;
     ERR_clear_error();
+    errno = 0;
     int n = SSL_accept(ssl);
-    return n == 1 ? 0 : -SSL_get_error(ssl, n);
+    int io_errno = errno;
+    int result = n == 1 ? 0 : -SSL_get_error(ssl, n);
+    mts_sigpipe_guard_end(&guard, io_errno);
+    return result;
 }
 
 /* Returns bytes read (> 0), 0 on clean TLS EOF (close_notify), or the
  * negated SSL_get_error class (< 0). */
 int mts_ssl_read(void *s, unsigned char *buf, int len) {
     SSL *ssl = ((mts_ssl *)s)->ssl;
+    mts_sigpipe_guard guard;
+    if (mts_sigpipe_guard_begin(&guard) != 0) return -SSL_ERROR_SYSCALL;
     ERR_clear_error();
+    errno = 0;
     int n = SSL_read(ssl, buf, len);
-    if (n > 0) return n;
-    int e = SSL_get_error(ssl, n);
-    if (e == SSL_ERROR_ZERO_RETURN) return 0;
-    return -e;
+    int io_errno = errno;
+    int result;
+    if (n > 0) {
+        result = n;
+    } else {
+        int error = SSL_get_error(ssl, n);
+        result = error == SSL_ERROR_ZERO_RETURN ? 0 : -error;
+    }
+    mts_sigpipe_guard_end(&guard, io_errno);
+    return result;
 }
 
 /* Returns bytes written (> 0) or the negated SSL_get_error class. */
 int mts_ssl_write(void *s, const unsigned char *buf, int len) {
     SSL *ssl = ((mts_ssl *)s)->ssl;
+    mts_sigpipe_guard guard;
+    if (mts_sigpipe_guard_begin(&guard) != 0) return -SSL_ERROR_SYSCALL;
     ERR_clear_error();
+    errno = 0;
     int n = SSL_write(ssl, buf, len);
-    if (n > 0) return n;
-    return -SSL_get_error(ssl, n);
+    int io_errno = errno;
+    int result = n > 0 ? n : -SSL_get_error(ssl, n);
+    mts_sigpipe_guard_end(&guard, io_errno);
+    return result;
 }
 
 int mts_ssl_wants_read(void *s) {
@@ -252,9 +349,14 @@ long mts_ssl_verify_result(void *s) {
 int mts_ssl_shutdown(void *s) {
     /* TLSStream.close treats shutdown as best-effort, so do not let an
      * ignored teardown error leak into the next session on this thread. */
+    mts_sigpipe_guard guard;
+    if (mts_sigpipe_guard_begin(&guard) != 0) return -1;
     ERR_clear_error();
+    errno = 0;
     int rc = SSL_shutdown(((mts_ssl *)s)->ssl);
+    int io_errno = errno;
     ERR_clear_error();
+    mts_sigpipe_guard_end(&guard, io_errno);
     return rc;
 }
 

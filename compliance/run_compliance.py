@@ -16,8 +16,10 @@ import argparse
 import json
 import os
 import platform
+import select
 import socket
 import ssl
+import struct
 import subprocess
 import sys
 import threading
@@ -55,6 +57,72 @@ def run_tool(binary: str, *args, timeout=90) -> subprocess.CompletedProcess:
     return subprocess.run(
         [*MOJO_RUN, str(TOOLS / f"{binary}.mojo"), *map(str, args)],
         capture_output=True, text=True, timeout=timeout, cwd=ROOT,
+    )
+
+
+def read_process_line(proc: subprocess.Popen, timeout: float = 10.0) -> str:
+    ready, _, _ = select.select([proc.stdout], [], [], timeout)
+    if not ready:
+        raise TimeoutError("timed out waiting for compliance peer")
+    return proc.stdout.readline().strip()
+
+
+def no_overlap_client_hello() -> bytes:
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    context.set_alpn_protocols(["http/1.1"])
+    incoming = ssl.MemoryBIO()
+    outgoing = ssl.MemoryBIO()
+    session = context.wrap_bio(incoming, outgoing, server_hostname="localhost")
+    try:
+        session.do_handshake()
+    except ssl.SSLWantReadError:
+        pass
+    return outgoing.read()
+
+
+def linux_sigpipe_probe() -> tuple[bool, str]:
+    if platform.system() != "Linux":
+        return True, "Linux-only EPIPE probe not required on this platform"
+
+    script = r"""
+import ctypes
+import signal
+import socket
+import sys
+
+library = ctypes.CDLL(sys.argv[1])
+library.mts_ctx_new_client.restype = ctypes.c_void_p
+library.mts_ssl_new.argtypes = [ctypes.c_void_p, ctypes.c_int]
+library.mts_ssl_new.restype = ctypes.c_void_p
+library.mts_ssl_connect.argtypes = [ctypes.c_void_p]
+library.mts_ssl_connect.restype = ctypes.c_int
+library.mts_ssl_free.argtypes = [ctypes.c_void_p]
+library.mts_ctx_free.argtypes = [ctypes.c_void_p]
+
+context = library.mts_ctx_new_client()
+local, peer = socket.socketpair()
+peer.close()
+session = library.mts_ssl_new(context, local.fileno())
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+result = library.mts_ssl_connect(session)
+print(f"RC {result}")
+library.mts_ssl_free(session)
+library.mts_ctx_free(context)
+local.close()
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(BUILD / "libmojotls.so")],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        timeout=10,
+    )
+    return (
+        result.returncode == 0 and result.stdout.strip() == "RC -5",
+        f"rc={result.returncode} out={result.stdout.strip()!r} "
+        f"err={result.stderr[:150]!r}",
     )
 
 
@@ -513,6 +581,85 @@ def section_tls():
         == [f"PORT {port}", "FIRST_READY", "SECOND_READY", "SEND", "OK"]
         and echoed == b"live",
         f"out={transcript!r} echoed={echoed!r} err={proc.stderr.read()[:150]!r}",
+    )
+
+    # OpenSSL's socket BIO writes alerts without MSG_NOSIGNAL on Linux. A
+    # reset peer must become a normal per-session TLS failure, not SIGPIPE
+    # that terminates the process. The same server then handles a verified
+    # h2 client so the check proves recovery, not only signal suppression.
+    signal_probe_ok, signal_probe_detail = linux_sigpipe_probe()
+    proc = subprocess.Popen(
+        [
+            *MOJO_RUN,
+            str(TOOLS / "tls_reset_recovery_server.mojo"),
+            str(CERTS / "server.pem"),
+            str(CERTS / "server.key"),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=ROOT,
+    )
+    transcript = []
+    echoed = b""
+    failure = ""
+    healthy = None
+    try:
+        ports_line = read_process_line(proc)
+        transcript.append(ports_line)
+        _, tls_port_text, gate_port_text = ports_line.split()
+        tls_port = int(tls_port_text)
+        gate_port = int(gate_port_text)
+        client_hello = no_overlap_client_hello()
+
+        for attempt in range(8):
+            rejected = socket.create_connection(("127.0.0.1", tls_port), timeout=10)
+            rejected.sendall(client_hello)
+            rejected.setsockopt(
+                socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0)
+            )
+            rejected.close()
+            with socket.create_connection(("127.0.0.1", gate_port), timeout=10) as gate:
+                gate.sendall(b"x")
+            line = read_process_line(proc)
+            transcript.append(line)
+            if line != f"REJECTED {attempt}":
+                raise RuntimeError(
+                    f"server stopped after reset {attempt}: rc={proc.poll()} line={line!r}"
+                )
+            if proc.poll() is not None:
+                raise RuntimeError(
+                    f"server exited after reset {attempt}: rc={proc.returncode}"
+                )
+
+        context = ssl.create_default_context(cafile=str(CERTS / "ca.pem"))
+        context.set_alpn_protocols(["h2"])
+        raw = socket.create_connection(("127.0.0.1", tls_port), timeout=10)
+        healthy = context.wrap_socket(raw, server_hostname="localhost")
+        healthy.sendall(b"live")
+        echoed = healthy.recv(4)
+        done = read_process_line(proc)
+        transcript.append(done)
+    except Exception as error:
+        failure = repr(error)
+    finally:
+        if healthy is not None:
+            healthy.close()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    record(
+        "tls",
+        "reset peers with rejected ALPN do not terminate the server",
+        proc.returncode == 0
+        and signal_probe_ok
+        and len(transcript) == 10
+        and transcript[-1:] == ["OK"]
+        and echoed == b"live",
+        f"rc={proc.returncode} out={transcript!r} echoed={echoed!r} failure={failure} "
+        f"signal_probe={signal_probe_detail} err={proc.stderr.read()[:150]!r}",
     )
 
 
