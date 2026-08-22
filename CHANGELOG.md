@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Prevented reset TLS peers from terminating Linux servers with SIGPIPE.
+
 ## 0.2.2 - 2026-08-22
 
 - Isolated each libssl operation from errors left by another TLS session on
