@@ -41,6 +41,9 @@ jobs:
       - name: Unit tests (builds the shim and cert corpus)
         run: pixi run test
 
+      - name: Nonblocking TLS example
+        run: pixi run example
+
       - name: Compatibility suite (differential vs CPython ssl)
         run: pixi run compliance
 

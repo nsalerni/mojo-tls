@@ -12,15 +12,16 @@ wrapped around [mojo-net](https://github.com/nsalerni/mojo-net)'s
 so protocol layers can use blocking helpers or drive partial encrypted I/O
 with the same Poller used for plain sockets.
 
-```mojo
-from net import TCPStream
-from tls import TLSContext
+## Quick start
 
-def main() raises:
-    var ctx = TLSContext.client(alpn=["h2"])
-    var tcp = TCPStream.connect("example.com", 443)
-    var stream = ctx.connect(tcp^, "example.com")
-    print(stream.version(), stream.negotiated_alpn())
+The tested [non-blocking TLS echo example](examples/nonblocking_tls_echo.mojo)
+drives a verified client and server on one Poller. It demonstrates SNI,
+hostname verification, h2 ALPN negotiation, resumable handshakes, and partial
+encrypted I/O over a loopback connection.
+
+```sh
+python3 tools/fetch_deps.py
+pixi run example
 ```
 
 ## How it works
