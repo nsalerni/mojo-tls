@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Isolated each libssl operation from errors left by another TLS session on
+  the same event-loop thread.
+
 ## 0.2.1 - 2026-08-21
 
 - Added readiness-driven client and server handshakes that preserve libssl's

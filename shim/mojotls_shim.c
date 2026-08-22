@@ -178,16 +178,19 @@ int mts_ssl_set_connect_name(void *s, const char *sni) {
     return 0;
 }
 
-/* Handshake calls return 0 on completion or the negated SSL_get_error class.
- * WANT_READ (-2) and WANT_WRITE (-3) are progress states, not failures. */
+/* SSL_get_error requires the thread error queue to be empty before the I/O
+ * call it classifies. Handshake calls return 0 on completion or the negated
+ * error class. WANT_READ (-2) and WANT_WRITE (-3) are progress states. */
 int mts_ssl_connect(void *s) {
     SSL *ssl = ((mts_ssl *)s)->ssl;
+    ERR_clear_error();
     int n = SSL_connect(ssl);
     return n == 1 ? 0 : -SSL_get_error(ssl, n);
 }
 
 int mts_ssl_accept(void *s) {
     SSL *ssl = ((mts_ssl *)s)->ssl;
+    ERR_clear_error();
     int n = SSL_accept(ssl);
     return n == 1 ? 0 : -SSL_get_error(ssl, n);
 }
@@ -196,6 +199,7 @@ int mts_ssl_accept(void *s) {
  * negated SSL_get_error class (< 0). */
 int mts_ssl_read(void *s, unsigned char *buf, int len) {
     SSL *ssl = ((mts_ssl *)s)->ssl;
+    ERR_clear_error();
     int n = SSL_read(ssl, buf, len);
     if (n > 0) return n;
     int e = SSL_get_error(ssl, n);
@@ -206,6 +210,7 @@ int mts_ssl_read(void *s, unsigned char *buf, int len) {
 /* Returns bytes written (> 0) or the negated SSL_get_error class. */
 int mts_ssl_write(void *s, const unsigned char *buf, int len) {
     SSL *ssl = ((mts_ssl *)s)->ssl;
+    ERR_clear_error();
     int n = SSL_write(ssl, buf, len);
     if (n > 0) return n;
     return -SSL_get_error(ssl, n);
@@ -245,7 +250,12 @@ long mts_ssl_verify_result(void *s) {
 }
 
 int mts_ssl_shutdown(void *s) {
-    return SSL_shutdown(((mts_ssl *)s)->ssl);
+    /* TLSStream.close treats shutdown as best-effort, so do not let an
+     * ignored teardown error leak into the next session on this thread. */
+    ERR_clear_error();
+    int rc = SSL_shutdown(((mts_ssl *)s)->ssl);
+    ERR_clear_error();
+    return rc;
 }
 
 void mts_ssl_free(void *p) {
