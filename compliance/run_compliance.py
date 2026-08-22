@@ -453,6 +453,68 @@ def section_tls():
         f"out={r.stdout.strip()!r} peer={pressure} err={r.stderr[:150]!r}",
     )
 
+    # A fatal record on one libssl session must not change the readiness
+    # result of the next session driven by the same server thread.
+    proc = subprocess.Popen(
+        [
+            *MOJO_RUN,
+            str(TOOLS / "tls_error_queue_server.mojo"),
+            str(CERTS / "server.pem"),
+            str(CERTS / "server.key"),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=ROOT,
+    )
+    transcript = []
+    healthy = None
+    echoed = b""
+    try:
+        port_line = proc.stdout.readline().strip()
+        transcript.append(port_line)
+        port = int(port_line.removeprefix("PORT "))
+        cctx = ssl.create_default_context(cafile=str(CERTS / "ca.pem"))
+        cctx.set_alpn_protocols(["h2"])
+        failed = cctx.wrap_socket(
+            socket.create_connection(("127.0.0.1", port), timeout=10),
+            server_hostname="localhost",
+        )
+        first_ready = proc.stdout.readline().strip()
+        transcript.append(first_ready)
+        failed_raw = socket.socket(fileno=failed.detach())
+        failed_raw.sendall(b"\x17\x03\x03\x00\x10" + b"\x00" * 16)
+        failed_raw.close()
+
+        healthy_raw = socket.create_connection(("127.0.0.1", port), timeout=10)
+        second_ready = proc.stdout.readline().strip()
+        transcript.append(second_ready)
+        healthy = cctx.wrap_socket(healthy_raw, server_hostname="localhost")
+        send = proc.stdout.readline().strip()
+        transcript.append(send)
+        if send == "SEND":
+            healthy.sendall(b"live")
+            echoed = healthy.recv(4)
+        done = proc.stdout.readline().strip()
+        transcript.append(done)
+    finally:
+        if healthy is not None:
+            healthy.close()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    record(
+        "tls",
+        "fatal session teardown does not contaminate the next nonblocking TLS session",
+        proc.returncode == 0
+        and transcript
+        == [f"PORT {port}", "FIRST_READY", "SECOND_READY", "SEND", "OK"]
+        and echoed == b"live",
+        f"out={transcript!r} echoed={echoed!r} err={proc.stderr.read()[:150]!r}",
+    )
+
 
 HTML_REPORT = ROOT / "COMPLIANCE.html"
 
