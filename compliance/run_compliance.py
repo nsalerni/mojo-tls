@@ -32,6 +32,22 @@ BUILD = ROOT / "build"
 TOOLS = ROOT / "compliance" / "tools"
 CERTS = BUILD / "certs"
 REPORT = ROOT / "COMPLIANCE.md"
+COMPLIANCE_BADGE = ROOT / "compliance-badge.json"
+
+EXPECTED_TLS_CHECKS = (
+    "mojo client vs CPython server: TLSv1.3, ALPN h2, 256KB echo",
+    "mojo client negotiates TLSv1.2 with a 1.2-capped server",
+    "CPython verifying client vs mojo server: chain, hostname, ALPN, echo",
+    "both reject an untrusted (self-signed) certificate",
+    "both reject a hostname mismatch on a CA-signed certificate",
+    "ALPN no overlap: our server alerts fatally, our client tolerates a server that proceeds without",
+    "resumable Mojo handshake matches CPython TLS and ALPN",
+    "partial Mojo TLS writes match CPython",
+    "partial Mojo TLS reads preserve WANT_READ against CPython",
+    "Mojo TLS write preserves WANT_WRITE under CPython backpressure",
+    "fatal session teardown does not contaminate the next nonblocking TLS session",
+    "reset peers with rejected ALPN do not terminate the server",
+)
 
 RESULTS: dict[str, list[tuple[str, bool, str]]] = {}
 
@@ -39,6 +55,57 @@ RESULTS: dict[str, list[tuple[str, bool, str]]] = {}
 def record(section: str, name: str, ok: bool, detail: str = ""):
     RESULTS.setdefault(section, []).append((name, bool(ok), detail))
     print(f"  {'PASS' if ok else 'FAIL'} [{section}] {name}" + ("" if ok else f"  <- {detail}"))
+
+
+def compliance_badge_payload(
+    results: dict[str, list[tuple[str, bool, str]]],
+) -> dict[str, object]:
+    """Build a Shields endpoint payload from the recorded TLS checks."""
+    rows = results.get("tls", [])
+    observed: dict[str, bool] = {}
+    duplicate = False
+    for name, ok, _ in rows:
+        if name in observed:
+            duplicate = True
+        observed[name] = bool(ok)
+
+    expected = set(EXPECTED_TLS_CHECKS)
+    unexpected = set(observed) - expected
+    passed = sum(observed.get(name, False) for name in EXPECTED_TLS_CHECKS)
+    complete = all(name in observed for name in EXPECTED_TLS_CHECKS)
+    valid = (
+        set(results) == {"tls"}
+        and len(rows) == len(EXPECTED_TLS_CHECKS)
+        and complete
+        and not duplicate
+        and not unexpected
+    )
+    all_passed = valid and passed == len(EXPECTED_TLS_CHECKS)
+    message = f"{passed}/{len(EXPECTED_TLS_CHECKS)} checks"
+    if duplicate or unexpected:
+        message = "results invalid"
+    return {
+        "schemaVersion": 1,
+        "label": "TLS compliance",
+        "message": message,
+        "color": "brightgreen" if all_passed else "red",
+    }
+
+
+def compliance_badge_json(
+    results: dict[str, list[tuple[str, bool, str]]],
+) -> str:
+    """Serialize the compliance badge in a stable form."""
+    return json.dumps(
+        compliance_badge_payload(results), indent=2, sort_keys=True
+    ) + "\n"
+
+
+def write_compliance_badge() -> bool:
+    payload = compliance_badge_payload(RESULTS)
+    COMPLIANCE_BADGE.write_text(compliance_badge_json(RESULTS))
+    print(f"report: {COMPLIANCE_BADGE.relative_to(ROOT)}")
+    return payload["color"] == "brightgreen"
 
 
 def dep_path(name: str) -> Path:
@@ -875,13 +942,14 @@ def main() -> int:
     section_tls()
     ok = write_report()
     write_html_report()
+    badge_ok = write_compliance_badge()
     if args.json:
         Path(args.json).write_text(json.dumps(
             {"sections": {s: [[n, o, d] for n, o, d in rows]
                           for s, rows in RESULTS.items()}}))
     print(f"\ncompliance: {sum(1 for v in RESULTS.values() for _, o, _ in v if o)}"
           f"/{sum(len(v) for v in RESULTS.values())} checks passed")
-    return 0 if ok else 1
+    return 0 if ok and badge_ok else 1
 
 
 if __name__ == "__main__":
