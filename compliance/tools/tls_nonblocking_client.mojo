@@ -1,5 +1,6 @@
 # Readiness-driven TLS client against a CPython ssl peer.
 # Usage: tls_nonblocking_client <port> <ca.pem> <bytes> [backpressure]
+#        tls_nonblocking_client <port> <ca.pem> <bytes> <cert.pem> <key.pem>
 
 from std.sys import argv
 
@@ -9,19 +10,31 @@ from tls import TLSContext
 
 def main() raises:
     var args = argv()
-    if len(args) < 4 or len(args) > 5:
+    if len(args) != 4 and len(args) != 5 and len(args) != 6:
         raise Error(
-            "usage: tls_nonblocking_client <port> <ca> <bytes> [backpressure]"
+            "usage: tls_nonblocking_client <port> <ca> <bytes>"
+            " [backpressure | <cert> <key>]"
         )
     var size = Int(args[3])
     var backpressure = len(args) == 5 and String(args[4]) == "backpressure"
+    if len(args) == 5 and not backpressure:
+        raise Error("the optional single argument must be 'backpressure'")
     var payload = List[Byte](capacity=size)
     for i in range(size):
         payload.append(UInt8((i * 17 + 11) % 256))
 
     var tcp = TCPStream.connect("127.0.0.1", UInt16(Int(args[1])))
     tcp.set_nonblocking(True)
-    var ctx = TLSContext.client(ca_file=String(args[2]), alpn=["h2"])
+    var ctx: TLSContext
+    if len(args) == 6:
+        ctx = TLSContext.client(
+            ca_file=String(args[2]),
+            cert_chain_pem=String(args[4]),
+            key_pem=String(args[5]),
+            alpn=["h2"],
+        )
+    else:
+        ctx = TLSContext.client(ca_file=String(args[2]), alpn=["h2"])
     var handshake = ctx.start_connect(tcp^, "localhost")
 
     var handshake_read = 0

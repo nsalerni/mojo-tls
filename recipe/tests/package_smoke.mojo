@@ -30,7 +30,14 @@ def main() raises:
     assert_equal(len(args), 4, "expected CA, certificate, and key paths")
 
     var server = run_server(String(args[2]), String(args[3]))
-    var context = TLSContext.client(ca_file=String(args[1]), alpn=["h2"])
+    # Loading an identity proves the packaged Mojo module and C shim agree on
+    # the client certificate API. This server does not request the identity.
+    var context = TLSContext.client(
+        ca_file=String(args[1]),
+        cert_chain_pem=String(args[2]),
+        key_pem=String(args[3]),
+        alpn=["h2"],
+    )
     var tcp = TCPStream.connect("127.0.0.1", server[0])
     var stream = context.connect(tcp^, "localhost")
 

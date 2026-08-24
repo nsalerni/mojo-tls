@@ -24,6 +24,9 @@ comptime WRONGHOST_CERT = "build/certs/wronghost.pem"
 comptime WRONGHOST_KEY = "build/certs/wronghost.key"
 comptime SELFSIGNED_CERT = "build/certs/selfsigned.pem"
 comptime SELFSIGNED_KEY = "build/certs/selfsigned.key"
+comptime CLIENT_CERT = "build/certs/client-chain.pem"
+comptime CLIENT_KEY = "build/certs/client.key"
+comptime CLIENT_ENCRYPTED_KEY = "build/certs/client-encrypted.key"
 
 
 def fork_tls_echo_server(
@@ -323,6 +326,56 @@ def test_bad_cert_paths() raises:
         assert_true("certificate" in String(e), String(e))
     assert_true(raised, "missing certificate file must raise")
 
+    raised = False
+    try:
+        _ = TLSContext.client(
+            verify=False, cert_chain_pem=String(CLIENT_CERT)
+        )
+    except e:
+        raised = True
+        assert_true("provided together" in String(e), String(e))
+    assert_true(raised, "a client certificate without its key must raise")
+
+    raised = False
+    try:
+        _ = TLSContext.client(verify=False, key_pem=String(CLIENT_KEY))
+    except e:
+        raised = True
+        assert_true("provided together" in String(e), String(e))
+    assert_true(raised, "a client key without its certificate must raise")
+
+    raised = False
+    try:
+        _ = TLSContext.client(
+            verify=False,
+            cert_chain_pem=String(CLIENT_CERT),
+            key_pem=String(SERVER_KEY),
+        )
+    except e:
+        raised = True
+        assert_true("client certificate" in String(e), String(e))
+    assert_true(raised, "a mismatched client certificate and key must raise")
+
+    raised = False
+    try:
+        _ = TLSContext.client(
+            verify=False,
+            cert_chain_pem=String(CLIENT_CERT),
+            key_pem=String(CLIENT_ENCRYPTED_KEY),
+        )
+    except e:
+        raised = True
+        assert_true("client certificate" in String(e), String(e))
+    assert_true(raised, "an encrypted client key must raise")
+
+
+def test_client_identity_configuration() raises:
+    _ = TLSContext.client(
+        verify=False,
+        cert_chain_pem=String(CLIENT_CERT),
+        key_pem=String(CLIENT_KEY),
+    )
+
 
 def main() raises:
     test_handshake_echo_alpn()
@@ -334,4 +387,5 @@ def main() raises:
     test_read_timeout_through_tls()
     test_nonblocking_handshake_and_partial_io()
     test_bad_cert_paths()
+    test_client_identity_configuration()
     print("test_tls: all tests passed")

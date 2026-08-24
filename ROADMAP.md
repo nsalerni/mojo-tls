@@ -4,13 +4,12 @@ Same rule as the rest of the family: nothing lands without a differential
 check against a reference implementation. Here the reference is CPython's
 `ssl` module on the other end of a live connection.
 
-## 1. Client certificates (mTLS)
+## 1. Server-side client certificate verification
 
-The shim and libssl already support it; the API does not expose it.
-`TLSContext.client` grows cert/key parameters and `TLSContext.server`
-grows a required-client-CA option. Verified by mutual-auth handshakes
-against CPython in both roles, including the rejection paths (no client
-cert offered, untrusted client cert).
+`TLSContext.server` needs an explicit client CA and a required-client option.
+It will be checked against CPython clients with trusted, missing, untrusted,
+and wrong-purpose certificates. Peer identity access will follow separately
+so applications can make authorization decisions.
 
 ## 2. Session resumption
 
@@ -19,6 +18,11 @@ Verified by CPython session-reuse checks (`session_reused` on the
 reference side) and handshake-count assertions.
 
 ## Completed foundation
+
+`TLSContext.client` can present a certificate chain and private key. A strict
+CPython server checks the successful readiness-driven handshake and rejects
+missing, untrusted, and wrong-purpose identities. Both mojo-tls and CPython
+reject a mismatched certificate and key before any connection is opened.
 
 `TLSHandshake` advances client and server handshakes one readiness event at a
 time. `TLSStream` implements mojo-net's `ReadinessStream`, preserving
