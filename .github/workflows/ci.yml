@@ -42,6 +42,9 @@ jobs:
       - name: Unit tests (builds the shim and cert corpus)
         run: pixi run test
 
+      - name: Blocking TLS client example
+        run: pixi run blocking-example
+
       - name: Nonblocking TLS example
         run: pixi run example
 

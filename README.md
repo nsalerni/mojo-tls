@@ -15,13 +15,28 @@ with the same Poller used for plain sockets.
 
 ## Quick start
 
-The tested [non-blocking TLS echo example](examples/nonblocking_tls_echo.mojo)
-drives a verified client and server on one Poller. It demonstrates SNI,
-hostname verification, h2 ALPN negotiation, non-blocking handshake progress,
-and partial encrypted I/O over a loopback connection.
+The [blocking TLS client example](examples/blocking_tls_client.mojo) connects
+to a local CPython TLS server. It trusts only the generated test CA, verifies
+the server certificate for `localhost`, negotiates the documented
+`mojo-tls-echo/1` ALPN token, and checks an exact request and response. It does
+not use the external network.
 
 ```sh
 python3 tools/fetch_deps.py
+pixi run blocking-example
+```
+
+The client copies the verified peer certificate before closing the stream.
+That snapshot owns its DER bytes, so it remains valid after the connection
+closes. Verification comes from the CA and hostname checks in the handshake,
+not from the presence of certificate bytes.
+
+The [non-blocking TLS echo example](examples/nonblocking_tls_echo.mojo) drives
+a verified client and server on one Poller. It demonstrates SNI, hostname
+verification, h2 ALPN negotiation, non-blocking handshake progress, and
+partial encrypted I/O over a loopback connection.
+
+```sh
 pixi run example
 ```
 
