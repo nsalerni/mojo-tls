@@ -43,6 +43,12 @@ EXPECTED_TLS_CHECKS = (
     "CPython rejects a Mojo client certificate with server-only usage",
     "both reject a mismatched client certificate and key before connect",
     "encrypted client keys are rejected without an interactive prompt",
+    "Mojo server accepts a trusted CPython client certificate chain under TLS 1.3",
+    "Mojo server rejects a CPython client without a required certificate under TLS 1.3",
+    "Mojo server rejects an untrusted CPython client certificate under TLS 1.3",
+    "Mojo server rejects a CPython client certificate with server-only usage under TLS 1.3",
+    "Mojo server accepts a trusted CPython client certificate chain under TLS 1.2",
+    "Mojo server rejects a CPython client without a required certificate under TLS 1.2",
     "mojo client negotiates TLSv1.2 with a 1.2-capped server",
     "CPython verifying client vs mojo server: chain, hostname, ALPN, echo",
     "both reject an untrusted (self-signed) certificate",
@@ -414,6 +420,138 @@ def mojo_client_rejected_by_required_python_server(
     return rejected, detail
 
 
+def python_client_against_required_mojo_server(
+    *,
+    cert: str | None = None,
+    key: str | None = None,
+    expect_rejection: bool = False,
+    tls_version: ssl.TLSVersion = ssl.TLSVersion.TLSv1_3,
+) -> dict:
+    process = subprocess.Popen(
+        [
+            *MOJO_RUN,
+            str(TOOLS / "tls_required_client_server.mojo"),
+            str(CERTS / "server.pem"),
+            str(CERTS / "server.key"),
+            str(CERTS / "ca.pem"),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=ROOT,
+        start_new_session=True,
+    )
+    version_text = tls_version.name.replace("_", ".")
+    result = {"configured_version": version_text}
+    raw = None
+    tls = None
+    connected = False
+    try:
+        result["port_line"] = read_process_line(process)
+        prefix = "PORT "
+        if not result["port_line"].startswith(prefix):
+            raise RuntimeError(
+                f"malformed compliance peer startup: {result['port_line']!r}"
+            )
+        port = int(result["port_line"][len(prefix):])
+        context = ssl.create_default_context(cafile=str(CERTS / "ca.pem"))
+        context.minimum_version = tls_version
+        context.maximum_version = tls_version
+        context.set_alpn_protocols(["h2"])
+        if cert is not None and key is not None:
+            context.load_cert_chain(str(CERTS / cert), str(CERTS / key))
+
+        raw = socket.create_connection(("127.0.0.1", port), timeout=10)
+        connected = True
+        tls = context.wrap_socket(raw, server_hostname="localhost")
+        raw = None
+        tls.settimeout(10)
+        result["version"] = tls.version()
+        result["alpn"] = tls.selected_alpn_protocol()
+        if expect_rejection:
+            result["unexpected_data"] = tls.recv(1)
+        else:
+            payload = bytes((index * 19 + 5) % 256 for index in range(16))
+            tls.sendall(payload)
+            echoed = bytearray()
+            while len(echoed) < len(payload):
+                chunk = tls.recv(len(payload) - len(echoed))
+                if not chunk:
+                    break
+                echoed.extend(chunk)
+            result["echo_ok"] = bytes(echoed) == payload
+            raw = tls.unwrap()
+            tls = None
+            raw.close()
+            raw = None
+    except Exception as error:
+        result["error"] = repr(error)
+        result["error_type"] = type(error).__name__
+        result["error_reason"] = getattr(error, "reason", None)
+    finally:
+        if tls is not None:
+            try:
+                tls.close()
+            except Exception:
+                pass
+        elif raw is not None:
+            try:
+                raw.close()
+            except OSError:
+                pass
+        if not connected and process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+
+    try:
+        stdout, stderr = process.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        stdout, stderr = process.communicate()
+        result["server_timed_out"] = True
+    result["server_stdout"] = stdout
+    result["server_stderr"] = stderr
+    result["server_output"] = stdout + stderr
+    result["server_rc"] = process.returncode
+    return result
+
+
+def required_mojo_server_rejected(
+    result: dict,
+    expected_client_reason: str,
+    expected_server_marker: str,
+    tls_version: ssl.TLSVersion = ssl.TLSVersion.TLSv1_3,
+    alert_after_handshake: bool = True,
+) -> bool:
+    return (
+        result.get("configured_version") == tls_version.name.replace("_", ".")
+        and (
+            (
+                not alert_after_handshake
+                and "version" not in result
+                and "alpn" not in result
+            )
+            or (
+                alert_after_handshake
+                and result.get("version")
+                == tls_version.name.replace("_", ".")
+                and result.get("alpn") == "h2"
+            )
+        )
+        and result.get("error_type") == "SSLError"
+        and result.get("error_reason") == expected_client_reason
+        and result.get("server_rc") != 0
+        and "tls: handshake failed" in result.get("server_output", "")
+        and expected_server_marker in result.get("server_output", "").lower()
+        and not result.get("server_timed_out", False)
+    )
+
+
 def py_stalled_tls_server(ctx, results: dict):
     """Completes a handshake, then leaves application bytes unread."""
     lsock = socket.socket()
@@ -613,6 +751,99 @@ def section_tls():
         f"python_loaded={python_loaded_encrypted_key} "
         f"timed_out={encrypted_timed_out} prompted={prompted} "
         f"output={encrypted_output[:200]!r}",
+    )
+
+    required = python_client_against_required_mojo_server(
+        cert="client-chain.pem", key="client.key"
+    )
+    record(
+        "tls",
+        "Mojo server accepts a trusted CPython client certificate chain under TLS 1.3",
+        required.get("version") == "TLSv1.3"
+        and required.get("alpn") == "h2"
+        and required.get("echo_ok") is True
+        and required.get("server_rc") == 0
+        and required.get("server_stdout", "").strip() == "DONE"
+        and "error" not in required,
+        repr(required),
+    )
+
+    required = python_client_against_required_mojo_server(
+        expect_rejection=True
+    )
+    record(
+        "tls",
+        "Mojo server rejects a CPython client without a required certificate under TLS 1.3",
+        required_mojo_server_rejected(
+            required,
+            "TLSV13_ALERT_CERTIFICATE_REQUIRED",
+            "peer did not return a certificate",
+        ),
+        repr(required),
+    )
+
+    required = python_client_against_required_mojo_server(
+        cert="untrusted_client.pem",
+        key="untrusted_client.key",
+        expect_rejection=True,
+    )
+    record(
+        "tls",
+        "Mojo server rejects an untrusted CPython client certificate under TLS 1.3",
+        required_mojo_server_rejected(
+            required,
+            "TLSV1_ALERT_UNKNOWN_CA",
+            "certificate verify failed",
+        ),
+        repr(required),
+    )
+
+    required = python_client_against_required_mojo_server(
+        cert="server.pem", key="server.key", expect_rejection=True
+    )
+    record(
+        "tls",
+        "Mojo server rejects a CPython client certificate with server-only usage under TLS 1.3",
+        required_mojo_server_rejected(
+            required,
+            "SSLV3_ALERT_UNSUPPORTED_CERTIFICATE",
+            "certificate verify failed",
+        ),
+        repr(required),
+    )
+
+    required = python_client_against_required_mojo_server(
+        cert="client-chain.pem",
+        key="client.key",
+        tls_version=ssl.TLSVersion.TLSv1_2,
+    )
+    record(
+        "tls",
+        "Mojo server accepts a trusted CPython client certificate chain under TLS 1.2",
+        required.get("version") == "TLSv1.2"
+        and required.get("alpn") == "h2"
+        and required.get("echo_ok") is True
+        and required.get("server_rc") == 0
+        and required.get("server_stdout", "").strip() == "DONE"
+        and "error" not in required,
+        repr(required),
+    )
+
+    required = python_client_against_required_mojo_server(
+        expect_rejection=True,
+        tls_version=ssl.TLSVersion.TLSv1_2,
+    )
+    record(
+        "tls",
+        "Mojo server rejects a CPython client without a required certificate under TLS 1.2",
+        required_mojo_server_rejected(
+            required,
+            "SSLV3_ALERT_HANDSHAKE_FAILURE",
+            "peer did not return a certificate",
+            tls_version=ssl.TLSVersion.TLSv1_2,
+            alert_after_handshake=False,
+        ),
+        repr(required),
     )
 
     # A server capped at TLS 1.2 negotiates TLSv1.2 with our client.
@@ -1088,14 +1319,14 @@ HTML_THESIS = (
 )
 HTML_GAPS = [
     (
-        "Server-side client authentication",
-        "Clients can present certificates; the server API cannot require or verify client certificates yet.",
+        "Peer certificate identity",
+        "Both roles can authenticate certificates, but applications cannot inspect the verified peer identity yet.",
     ),
     ("Session resumption", "Every connection is a full handshake for now."),
 ]
 HTML_SECTIONS = {
     "tls": ("`tls` vs CPython `ssl`",
-            "Live connections with CPython's ssl module as the peer in both roles: TLS 1.3 and 1.2 negotiation, ALPN agreement and fatal-alert on no overlap, chain and hostname verification, client identity acceptance and rejection, bulk and readiness-driven transfer through the record layer, and a bad-certificate corpus that both implementations must reject."),
+            "Live connections with CPython's ssl module as the peer in both roles: TLS 1.3 and 1.2 negotiation, ALPN agreement and fatal-alert on no overlap, chain and hostname verification, client certificate authentication in both roles, bulk and readiness-driven transfer through the record layer, and a bad-certificate corpus that both implementations must reject."),
 }
 
 

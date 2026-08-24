@@ -119,6 +119,18 @@ tests:
             -CA "${WORK}/ca.pem" -CAkey "${WORK}/ca.key" -CAcreateserial \
             -extfile "${WORK}/server.ext" \
             -out "${WORK}/server.pem" -days 1 >/dev/null 2>&1
+          openssl req -newkey rsa:2048 -sha256 -nodes \
+            -subj '/CN=mojo-tls package client' \
+            -keyout "${WORK}/client.key" -out "${WORK}/client.csr" \
+            >/dev/null 2>&1
+          printf '%s\n' \
+            'keyUsage=critical,digitalSignature,keyEncipherment' \
+            'extendedKeyUsage=clientAuth' 'basicConstraints=CA:FALSE' \
+            > "${WORK}/client.ext"
+          openssl x509 -req -sha256 -in "${WORK}/client.csr" \
+            -CA "${WORK}/ca.pem" -CAkey "${WORK}/ca.key" -CAcreateserial \
+            -extfile "${WORK}/client.ext" \
+            -out "${WORK}/client.pem" -days 1 >/dev/null 2>&1
 
           SMOKE="${PWD}/tests/package_smoke.mojo"
           MOJO="${PREFIX}/bin/mojo"
@@ -132,10 +144,11 @@ tests:
           if [ "$(uname -s)" = Linux ]; then
             "${MOJO}" build --emit object "${SMOKE}" -o package_smoke.o
             test -s package_smoke.o
-            "${MOJO}" run "${SMOKE}" ca.pem server.pem server.key
+            "${MOJO}" run "${SMOKE}" ca.pem server.pem server.key \
+              client.pem client.key
           else
             "${MOJO}" build "${SMOKE}" -o package_smoke
-            ./package_smoke ca.pem server.pem server.key
+            ./package_smoke ca.pem server.pem server.key client.pem client.key
           fi
     files:
       recipe:

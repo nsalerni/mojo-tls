@@ -47,6 +47,21 @@ that they match while it builds the context, before opening a connection.
 Private keys must be unencrypted. Encrypted keys fail without prompting for a
 passphrase.
 
+Servers can require a client certificate signed by a configured CA:
+
+```mojo
+var context = TLSContext.server(
+    "server-chain.pem",
+    "server.key",
+    client_ca_file="client-ca.pem",
+    require_client_cert=True,
+    alpn=["h2"],
+)
+```
+
+`client_ca_file` and `require_client_cert=True` must be provided together.
+The default server configuration does not request a client certificate.
+
 ## How it works
 
 The protocol logic everywhere else in this family is pure Mojo; the
@@ -83,9 +98,10 @@ other end of the connection, in both roles:
 - chain and hostname verification, with a generated bad-certificate
   corpus (self-signed, wrong hostname) that both implementations must
   reject for the same reasons
-- trusted client certificate acceptance, plus rejection of missing
-  certificates, untrusted chains, server-only certificates, mismatched keys,
-  and encrypted keys
+- client certificate presentation and server-side verification under TLS 1.2
+  and TLS 1.3, with trusted chains and rejection of missing certificates,
+  untrusted chains, server-only certificates, mismatched keys, and encrypted
+  keys
 - non-blocking handshake progress, an 8 MiB partial-I/O exchange, and a bounded
   WANT_WRITE backpressure probe against CPython TLS peers
 
@@ -100,8 +116,8 @@ pixi run compliance           # differential vs CPython ssl; rewrites COMPLIANCE
 ## Status
 
 Built for [grpc-mojo](https://github.com/nsalerni/grpc-mojo), which uses it
-for secure HTTP/2 and gRPC transports. Server-side client certificate
-verification and session resumption remain; see [ROADMAP.md](ROADMAP.md).
+for secure HTTP/2 and gRPC transports. Peer certificate identity access and
+session resumption remain; see [ROADMAP.md](ROADMAP.md).
 
 ## License
 

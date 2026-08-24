@@ -30,7 +30,11 @@ comptime CLIENT_ENCRYPTED_KEY = "build/certs/client-encrypted.key"
 
 
 def fork_tls_echo_server(
-    cert: StringSpan, key: StringSpan, alpn: List[String]
+    cert: StringSpan,
+    key: StringSpan,
+    alpn: List[String],
+    client_ca: StringSpan = "",
+    require_client_cert: Bool = False,
 ) raises -> Tuple[UInt16, c_int]:
     """Forks a one-connection TLS echo server; returns (port, child pid).
 
@@ -43,7 +47,13 @@ def fork_tls_echo_server(
     var pid = external_call["fork", c_int]()
     if pid == 0:
         try:
-            var ctx = TLSContext.server(String(cert), String(key), alpn=alpn)
+            var ctx = TLSContext.server(
+                String(cert),
+                String(key),
+                client_ca_file=String(client_ca),
+                require_client_cert=require_client_cert,
+                alpn=alpn,
+            )
             var tcp = listener.accept()
             var stream = ctx.accept(tcp^)
             while True:
@@ -87,6 +97,29 @@ def test_handshake_echo_alpn() raises:
         var got = stream.read_exact(16384)
         assert_equal(got[0], 0x3C)
 
+    stream.close()
+    reap(server[1])
+
+
+def test_required_client_certificate() raises:
+    var server = fork_tls_echo_server(
+        SERVER_CERT,
+        SERVER_KEY,
+        ["h2"],
+        client_ca=CA,
+        require_client_cert=True,
+    )
+    var ctx = TLSContext.client(
+        ca_file=String(CA),
+        cert_chain_pem=String(CLIENT_CERT),
+        key_pem=String(CLIENT_KEY),
+        alpn=["h2"],
+    )
+    var tcp = TCPStream.connect("127.0.0.1", server[0])
+    var stream = ctx.connect(tcp^, "localhost")
+    assert_equal(stream.negotiated_alpn(), "h2")
+    stream.write_all("auth".as_bytes())
+    assert_equal(String(from_utf8=stream.read_exact(4)), "auth")
     stream.close()
     reap(server[1])
 
@@ -328,6 +361,43 @@ def test_bad_cert_paths() raises:
 
     raised = False
     try:
+        _ = TLSContext.server(
+            String(SERVER_CERT),
+            String(SERVER_KEY),
+            client_ca_file=String(CA),
+        )
+    except e:
+        raised = True
+        assert_true("provided together" in String(e), String(e))
+    assert_true(raised, "a client CA without the required flag must raise")
+
+    raised = False
+    try:
+        _ = TLSContext.server(
+            String(SERVER_CERT),
+            String(SERVER_KEY),
+            require_client_cert=True,
+        )
+    except e:
+        raised = True
+        assert_true("provided together" in String(e), String(e))
+    assert_true(raised, "the required flag without a client CA must raise")
+
+    raised = False
+    try:
+        _ = TLSContext.server(
+            String(SERVER_CERT),
+            String(SERVER_KEY),
+            client_ca_file="build/certs/missing-ca.pem",
+            require_client_cert=True,
+        )
+    except e:
+        raised = True
+        assert_true("loading client CA" in String(e), String(e))
+    assert_true(raised, "a missing client CA file must raise")
+
+    raised = False
+    try:
         _ = TLSContext.client(
             verify=False, cert_chain_pem=String(CLIENT_CERT)
         )
@@ -379,6 +449,7 @@ def test_client_identity_configuration() raises:
 
 def main() raises:
     test_handshake_echo_alpn()
+    test_required_client_certificate()
     test_clean_eof()
     test_reject_untrusted_ca()
     test_reject_wrong_hostname()
