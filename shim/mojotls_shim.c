@@ -195,6 +195,29 @@ int mts_ctx_load_ca(void *p, const char *ca_pem_path) {
                : -1;
 }
 
+int mts_ctx_require_client_cert(void *p, const char *ca_pem_path) {
+    mts_ctx *c = (mts_ctx *)p;
+    ERR_clear_error();
+    if (SSL_CTX_load_verify_locations(c->ctx, ca_pem_path, NULL) != 1)
+        return -1;
+
+    STACK_OF(X509_NAME) *ca_names = SSL_load_client_CA_file(ca_pem_path);
+    if (!ca_names) return -1;
+    if (X509_VERIFY_PARAM_set_flags(SSL_CTX_get0_param(c->ctx),
+                                    X509_V_FLAG_X509_STRICT) != 1) {
+        sk_X509_NAME_pop_free(ca_names, X509_NAME_free);
+        return -1;
+    }
+
+    /* SSL_CTX takes ownership of the advertised acceptable CA names. */
+    SSL_CTX_set_client_CA_list(c->ctx, ca_names);
+    SSL_CTX_set_verify(c->ctx,
+                       SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT,
+                       NULL);
+    ERR_clear_error();
+    return 0;
+}
+
 int mts_ctx_load_default_ca(void *p) {
     return SSL_CTX_set_default_verify_paths(((mts_ctx *)p)->ctx) == 1 ? 0 : -1;
 }

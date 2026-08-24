@@ -191,6 +191,8 @@ struct TLSContext(Movable):
         cert_chain_pem: String,
         key_pem: String,
         *,
+        client_ca_file: String = "",
+        require_client_cert: Bool = False,
         alpn: List[String] = List[String](),
     ) raises -> TLSContext:
         """Builds a server-side context from a certificate chain and key.
@@ -198,6 +200,10 @@ struct TLSContext(Movable):
         Args:
             cert_chain_pem: Path to the PEM certificate chain file.
             key_pem: Path to the PEM private key file.
+            client_ca_file: PEM bundle of client trust anchors. Must be paired
+                with `require_client_cert=True`.
+            require_client_cert: Require and verify a client certificate
+                against `client_ca_file`.
             alpn: Protocols to accept, most preferred first; a client
                 offering no overlap is rejected with a fatal alert.
 
@@ -205,8 +211,13 @@ struct TLSContext(Movable):
             The configured context.
 
         Raises:
-            If the shim fails or the certificate/key cannot be loaded.
+            If the shim, identity, client CA, or ALPN configuration fails.
         """
+        if require_client_cert != (client_ca_file != ""):
+            raise Error(
+                "tls: client CA and require_client_cert must be provided"
+                " together"
+            )
         var lib = OwnedDLHandle(_shim_path())
         var cert = cert_chain_pem.copy()
         var key = key_pem.copy()
@@ -216,6 +227,13 @@ struct TLSContext(Movable):
         if ctx == 0:
             raise _shim_error(lib, "tls: loading certificate/key")
         var out = TLSContext(_lib=lib^, _ctx=ctx, _is_server=True)
+        if require_client_cert:
+            var client_ca = client_ca_file.copy()
+            var rc = out._lib.get_function[c_int](
+                "mts_ctx_require_client_cert"
+            )(out._ctx, client_ca.as_c_string_slice())
+            if Int(rc) != 0:
+                raise _shim_error(out._lib, "tls: loading client CA")
         out._set_alpn(alpn)
         return out^
 

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added required server-side client certificate verification against a
+  configured CA, with strict X.509 checks and safe paired configuration.
+- Added live CPython client checks under TLS 1.2 and TLS 1.3 for trusted and
+  missing identities, plus TLS 1.3 checks for untrusted and wrong-purpose
+  identities.
 - Added client certificate presentation with construction-time certificate
   and key validation.
 - Client certificate chains may include intermediate certificates. Encrypted

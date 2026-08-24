@@ -4,12 +4,10 @@ Same rule as the rest of the family: nothing lands without a differential
 check against a reference implementation. Here the reference is CPython's
 `ssl` module on the other end of a live connection.
 
-## 1. Server-side client certificate verification
+## 1. Peer certificate identity
 
-`TLSContext.server` needs an explicit client CA and a required-client option.
-It will be checked against CPython clients with trusted, missing, untrusted,
-and wrong-purpose certificates. Peer identity access will follow separately
-so applications can make authorization decisions.
+Expose the verified peer certificate and selected identity fields so servers
+can make authorization decisions after client authentication.
 
 ## 2. Session resumption
 
@@ -18,6 +16,11 @@ Verified by CPython session-reuse checks (`session_reused` on the
 reference side) and handshake-count assertions.
 
 ## Completed foundation
+
+`TLSContext.server` can require a client certificate signed by a configured
+CA. CPython clients verify acceptance of a trusted chain and rejection of
+missing, untrusted, and wrong-purpose certificates. The client CA and required
+flag must be configured together.
 
 `TLSContext.client` can present a certificate chain and private key. A strict
 CPython server checks the successful readiness-driven handshake and rejects
