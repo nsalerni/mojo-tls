@@ -25,7 +25,7 @@ class ComplianceBadgeTest(unittest.TestCase):
         self.assertEqual(payload, {
             "schemaVersion": 1,
             "label": "TLS compliance",
-            "message": "12/12 checks",
+            "message": "18/18 checks",
             "color": "brightgreen",
         })
         serialized = compliance_badge_json(results)
@@ -39,7 +39,7 @@ class ComplianceBadgeTest(unittest.TestCase):
 
         payload = compliance_badge_payload(results)
 
-        self.assertEqual(payload["message"], "11/12 checks")
+        self.assertEqual(payload["message"], "17/18 checks")
         self.assertEqual(payload["color"], "red")
 
     def test_missing_check_cannot_produce_a_green_badge(self):
@@ -48,7 +48,7 @@ class ComplianceBadgeTest(unittest.TestCase):
 
         payload = compliance_badge_payload(results)
 
-        self.assertEqual(payload["message"], "11/12 checks")
+        self.assertEqual(payload["message"], "17/18 checks")
         self.assertEqual(payload["color"], "red")
 
     def test_duplicate_or_unknown_check_marks_results_invalid(self):

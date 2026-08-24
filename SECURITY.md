@@ -12,6 +12,6 @@ mojo-tls uses OpenSSL for TLS 1.2 and TLS 1.3 through a small C shim. Client
 connections verify certificate chains and hostnames by default. The package
 also supports SNI, ALPN, non-blocking handshakes, and partial encrypted I/O.
 
-Client certificate authentication and TLS session resumption are not yet
-supported. The project has not had an external security review. See
-[ROADMAP.md](ROADMAP.md) for the remaining work.
+Servers cannot require or verify client certificates yet. TLS session
+resumption is also unsupported. The project has not had an external security
+review. See [ROADMAP.md](ROADMAP.md) for the remaining work.

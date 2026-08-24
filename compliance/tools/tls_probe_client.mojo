@@ -1,5 +1,6 @@
 # Compliance tool: TLS probe client.
 # Usage: tls_probe_client <port> <sni> <ca_pem|-> <alpn_csv|-> <nbytes>
+#                         [<client_cert_pem> <client_key_pem>]
 # Connects, handshakes, prints "VERSION <v>" and "ALPN <p>", echoes nbytes
 # of patterned data, verifies the echo, prints "OK <n>". A failed
 # handshake exits non-zero with the error on stderr.
@@ -12,6 +13,11 @@ from tls import TLSContext
 
 def main() raises:
     var args = argv()
+    if len(args) != 6 and len(args) != 8:
+        raise Error(
+            "usage: tls_probe_client <port> <sni> <ca|-> <alpn|-> <bytes>"
+            " [<client_cert> <client_key>]"
+        )
     var port = UInt16(Int(args[1]))
     var sni = String(args[2])
     var ca = String(args[3])
@@ -24,9 +30,25 @@ def main() raises:
             alpn.append(String(part))
     var ctx: TLSContext
     if ca == "-":
-        ctx = TLSContext.client(verify=False, alpn=alpn)
+        if len(args) == 8:
+            ctx = TLSContext.client(
+                verify=False,
+                cert_chain_pem=String(args[6]),
+                key_pem=String(args[7]),
+                alpn=alpn,
+            )
+        else:
+            ctx = TLSContext.client(verify=False, alpn=alpn)
     else:
-        ctx = TLSContext.client(ca_file=ca, alpn=alpn)
+        if len(args) == 8:
+            ctx = TLSContext.client(
+                ca_file=ca,
+                cert_chain_pem=String(args[6]),
+                key_pem=String(args[7]),
+                alpn=alpn,
+            )
+        else:
+            ctx = TLSContext.client(ca_file=ca, alpn=alpn)
 
     var tcp = TCPStream.connect("127.0.0.1", port)
     var stream = ctx.connect(tcp^, sni)

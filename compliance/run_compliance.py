@@ -17,6 +17,7 @@ import json
 import os
 import platform
 import select
+import signal
 import socket
 import ssl
 import struct
@@ -36,12 +37,18 @@ COMPLIANCE_BADGE = ROOT / "compliance-badge.json"
 
 EXPECTED_TLS_CHECKS = (
     "mojo client vs CPython server: TLSv1.3, ALPN h2, 256KB echo",
+    "nonblocking Mojo client presents a trusted certificate chain to CPython",
+    "CPython rejects a Mojo client without a required certificate",
+    "CPython rejects an untrusted Mojo client certificate",
+    "CPython rejects a Mojo client certificate with server-only usage",
+    "both reject a mismatched client certificate and key before connect",
+    "encrypted client keys are rejected without an interactive prompt",
     "mojo client negotiates TLSv1.2 with a 1.2-capped server",
     "CPython verifying client vs mojo server: chain, hostname, ALPN, echo",
     "both reject an untrusted (self-signed) certificate",
     "both reject a hostname mismatch on a CA-signed certificate",
     "ALPN no overlap: our server alerts fatally, our client tolerates a server that proceeds without",
-    "resumable Mojo handshake matches CPython TLS and ALPN",
+    "nonblocking Mojo handshake matches CPython TLS and ALPN",
     "partial Mojo TLS writes match CPython",
     "partial Mojo TLS reads preserve WANT_READ against CPython",
     "Mojo TLS write preserves WANT_WRITE under CPython backpressure",
@@ -125,6 +132,35 @@ def run_tool(binary: str, *args, timeout=90) -> subprocess.CompletedProcess:
         [*MOJO_RUN, str(TOOLS / f"{binary}.mojo"), *map(str, args)],
         capture_output=True, text=True, timeout=timeout, cwd=ROOT,
     )
+
+
+def run_tool_with_unanswered_stdin(
+    binary: str, *args, timeout: float
+) -> tuple[subprocess.CompletedProcess, bool]:
+    """Run a probe while keeping its stdin open without sending a response."""
+    command = [*MOJO_RUN, str(TOOLS / f"{binary}.mojo"), *map(str, args)]
+    proc = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=ROOT,
+        start_new_session=True,
+    )
+    timed_out = False
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    stdout, stderr = proc.communicate()
+    return subprocess.CompletedProcess(
+        command, proc.returncode, stdout, stderr
+    ), timed_out
 
 
 def read_process_line(proc: subprocess.Popen, timeout: float = 10.0) -> str:
@@ -215,11 +251,25 @@ def build_tools():
 
 # ------------------------------------------------------------------ tls ---
 
-def py_server_ctx(cert: str, key: str, alpn=None, max_version=None):
+def py_server_ctx(
+    cert: str,
+    key: str,
+    alpn=None,
+    min_version=None,
+    max_version=None,
+    client_ca: str | None = None,
+):
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(str(CERTS / cert), str(CERTS / key))
+    if client_ca is not None:
+        ctx.load_verify_locations(cafile=str(CERTS / client_ca))
+        ctx.verify_mode = ssl.CERT_REQUIRED
+        if hasattr(ssl, "VERIFY_X509_STRICT"):
+            ctx.verify_flags |= ssl.VERIFY_X509_STRICT
     if alpn:
         ctx.set_alpn_protocols(alpn)
+    if min_version is not None:
+        ctx.minimum_version = min_version
     if max_version is not None:
         ctx.maximum_version = max_version
     return ctx
@@ -237,6 +287,8 @@ def py_echo_server(ctx, results: dict):
             conn, _ = lsock.accept()
             conn.settimeout(30)
             tls = ctx.wrap_socket(conn, server_side=True)
+            results["peer_cert"] = tls.getpeercert()
+            results["peer_cert_der"] = tls.getpeercert(binary_form=True)
             while True:
                 chunk = tls.recv(65536)
                 if not chunk:
@@ -245,6 +297,9 @@ def py_echo_server(ctx, results: dict):
             tls.close()
         except Exception as e:
             results["error"] = repr(e)
+            results["error_type"] = type(e).__name__
+            results["error_reason"] = getattr(e, "reason", None)
+            results["verify_code"] = getattr(e, "verify_code", None)
         finally:
             lsock.close()
 
@@ -268,6 +323,8 @@ def py_receive_then_echo(ctx, size: int, results: dict):
             tls = ctx.wrap_socket(conn, server_side=True)
             results["version"] = tls.version()
             results["alpn"] = tls.selected_alpn_protocol()
+            results["peer_cert"] = tls.getpeercert()
+            results["peer_cert_der"] = tls.getpeercert(binary_form=True)
             received = bytearray()
             while len(received) < size:
                 chunk = tls.recv(min(16384, size - len(received)))
@@ -290,6 +347,71 @@ def py_receive_then_echo(ctx, size: int, results: dict):
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
     return thread
+
+
+def mojo_client_rejected_by_required_python_server(
+    *,
+    expected_reason: str | None = None,
+    expected_verify_code: int | None = None,
+    cert: str | None = None,
+    key: str | None = None,
+) -> tuple[bool, str]:
+    results = {"ready": threading.Event()}
+    thread = py_echo_server(
+        py_server_ctx(
+            "server.pem",
+            "server.key",
+            ["h2"],
+            min_version=ssl.TLSVersion.TLSv1_3,
+            max_version=ssl.TLSVersion.TLSv1_3,
+            client_ca="ca.pem",
+        ),
+        results,
+    )
+    results["ready"].wait(10)
+    args = [
+        results["port"],
+        "localhost",
+        str(CERTS / "ca.pem"),
+        "h2",
+        16,
+    ]
+    if cert is not None and key is not None:
+        args.extend([str(CERTS / cert), str(CERTS / key)])
+    result = run_tool("tls_probe_client", *args, timeout=60)
+    thread.join(timeout=30)
+    client_output = result.stdout + result.stderr
+    mojo_tls_failure = (
+        result.returncode != 0
+        and any(
+            marker in client_output
+            for marker in ("tls read failed", "tls write failed")
+        )
+        and "VERSION TLSv1.3" in result.stdout
+        and "ALPN h2" in result.stdout
+    )
+    expected_peer_failure = True
+    if expected_reason is not None:
+        expected_peer_failure = results.get("error_reason") == expected_reason
+    if expected_verify_code is not None:
+        expected_peer_failure = (
+            expected_peer_failure
+            and results.get("verify_code") == expected_verify_code
+        )
+    rejected = (
+        mojo_tls_failure
+        and expected_peer_failure
+        and not thread.is_alive()
+    )
+    detail = (
+        f"rc={result.returncode} out={result.stdout.strip()!r} "
+        f"err={result.stderr[:150]!r} "
+        f"server_type={results.get('error_type')!r} "
+        f"server_reason={results.get('error_reason')!r} "
+        f"verify_code={results.get('verify_code')!r} "
+        f"server_error={results.get('error')!r}"
+    )
+    return rejected, detail
 
 
 def py_stalled_tls_server(ctx, results: dict):
@@ -335,6 +457,163 @@ def section_tls():
            r.returncode == 0 and "VERSION TLSv1.3" in r.stdout
            and "ALPN h2" in r.stdout and f"OK {n}" in r.stdout,
            f"rc={r.returncode} out={r.stdout.strip()!r} err={r.stderr[:150]!r}")
+
+    # Client identity support is judged by a strict CPython server. The
+    # successful case uses the nonblocking Mojo handshake path. Rejection
+    # cases attempt application I/O so delayed TLS 1.3 alerts are observed.
+    mtls_size = 65_536
+    res = {"ready": threading.Event()}
+    t = py_receive_then_echo(
+        py_server_ctx(
+            "server.pem",
+            "server.key",
+            ["h2"],
+            min_version=ssl.TLSVersion.TLSv1_3,
+            max_version=ssl.TLSVersion.TLSv1_3,
+            client_ca="ca.pem",
+        ),
+        mtls_size,
+        res,
+    )
+    res["ready"].wait(10)
+    r = run_tool(
+        "tls_nonblocking_client",
+        res["port"],
+        str(CERTS / "ca.pem"),
+        mtls_size,
+        str(CERTS / "client-chain.pem"),
+        str(CERTS / "client.key"),
+        timeout=60,
+    )
+    t.join(timeout=30)
+    values = None
+    parts = r.stdout.split()
+    if r.returncode == 0 and len(parts) == 9 and parts[0] == "OK":
+        try:
+            values = tuple(map(int, parts[1:]))
+        except ValueError:
+            pass
+    valid_identity = (
+        values is not None
+        and values[0] == mtls_size
+        and values[1] == mtls_size
+        and values[4] + values[5] > 0
+        and res.get("peer_cert_der")
+        == ssl.PEM_cert_to_DER_cert((CERTS / "client.pem").read_text())
+        and res.get("version") == "TLSv1.3"
+        and res.get("alpn") == "h2"
+        and "error" not in res
+        and not t.is_alive()
+    )
+    record(
+        "tls",
+        "nonblocking Mojo client presents a trusted certificate chain to CPython",
+        valid_identity,
+        f"out={r.stdout.strip()!r} version={res.get('version')!r} "
+        f"alpn={res.get('alpn')!r} peer={res.get('peer_cert')!r} "
+        f"server_error={res.get('error')!r} err={r.stderr[:150]!r}",
+    )
+
+    rejected, detail = mojo_client_rejected_by_required_python_server(
+        expected_reason="PEER_DID_NOT_RETURN_A_CERTIFICATE"
+    )
+    record(
+        "tls",
+        "CPython rejects a Mojo client without a required certificate",
+        rejected,
+        detail,
+    )
+
+    rejected, detail = mojo_client_rejected_by_required_python_server(
+        expected_verify_code=20,
+        cert="untrusted_client.pem",
+        key="untrusted_client.key",
+    )
+    record(
+        "tls",
+        "CPython rejects an untrusted Mojo client certificate",
+        rejected,
+        detail,
+    )
+
+    rejected, detail = mojo_client_rejected_by_required_python_server(
+        expected_verify_code=26,
+        cert="server.pem",
+        key="server.key",
+    )
+    record(
+        "tls",
+        "CPython rejects a Mojo client certificate with server-only usage",
+        rejected,
+        detail,
+    )
+
+    python_mismatch_reason = None
+    try:
+        mismatch = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        mismatch.load_cert_chain(
+            str(CERTS / "client-chain.pem"), str(CERTS / "server.key")
+        )
+    except ssl.SSLError as error:
+        python_mismatch_reason = getattr(error, "reason", None)
+    r = run_tool(
+        "tls_client_context",
+        str(CERTS / "client-chain.pem"),
+        str(CERTS / "server.key"),
+    )
+    mojo_output = (r.stdout + r.stderr).lower()
+    mojo_rejected = (
+        r.returncode != 0
+        and "loading client certificate/key" in mojo_output
+        and "key values mismatch" in mojo_output
+    )
+    record(
+        "tls",
+        "both reject a mismatched client certificate and key before connect",
+        python_mismatch_reason == "KEY_VALUES_MISMATCH" and mojo_rejected,
+        f"python_reason={python_mismatch_reason!r} mojo={mojo_rejected} "
+        f"out={r.stdout.strip()!r} err={r.stderr[:150]!r}",
+    )
+
+    python_loaded_encrypted_key = False
+    try:
+        encrypted = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        encrypted.load_cert_chain(
+            str(CERTS / "client-chain.pem"),
+            str(CERTS / "client-encrypted.key"),
+            password="mojo-tls-test-only",
+        )
+        python_loaded_encrypted_key = True
+    except ssl.SSLError:
+        pass
+    encrypted_result, encrypted_timed_out = run_tool_with_unanswered_stdin(
+        "tls_client_context",
+        str(CERTS / "client-chain.pem"),
+        str(CERTS / "client-encrypted.key"),
+        timeout=5,
+    )
+    encrypted_output = encrypted_result.stdout + encrypted_result.stderr
+    encrypted_output_lower = encrypted_output.lower()
+    prompted = any(
+        marker in encrypted_output_lower
+        for marker in (
+            "enter pem pass phrase",
+            "enter pass phrase",
+            "enter password",
+        )
+    )
+    record(
+        "tls",
+        "encrypted client keys are rejected without an interactive prompt",
+        python_loaded_encrypted_key
+        and not encrypted_timed_out
+        and encrypted_result.returncode != 0
+        and "loading client certificate/key" in encrypted_output_lower
+        and not prompted,
+        f"python_loaded={python_loaded_encrypted_key} "
+        f"timed_out={encrypted_timed_out} prompted={prompted} "
+        f"output={encrypted_output[:200]!r}",
+    )
 
     # A server capped at TLS 1.2 negotiates TLSv1.2 with our client.
     res = {"ready": threading.Event()}
@@ -517,7 +796,7 @@ def section_tls():
     )
     record(
         "tls",
-        "resumable Mojo handshake matches CPython TLS and ALPN",
+        "nonblocking Mojo handshake matches CPython TLS and ALPN",
         handshake_ok,
         detail,
     )
@@ -808,12 +1087,15 @@ HTML_THESIS = (
     " same reasons the reference rejects them."
 )
 HTML_GAPS = [
-    ("Client certificates (mTLS)", "not exposed yet; the shim and libssl support it, the API does not."),
-    ("Session resumption", "every connection is a full handshake for now."),
+    (
+        "Server-side client authentication",
+        "Clients can present certificates; the server API cannot require or verify client certificates yet.",
+    ),
+    ("Session resumption", "Every connection is a full handshake for now."),
 ]
 HTML_SECTIONS = {
     "tls": ("`tls` vs CPython `ssl`",
-            "Live connections with CPython's ssl module as the peer in both roles: TLS 1.3 and 1.2 negotiation, ALPN agreement and fatal-alert on no overlap, chain and hostname verification, bulk and readiness-driven transfer through the record layer, and a bad-certificate corpus (self-signed, wrong hostname) that both implementations must reject."),
+            "Live connections with CPython's ssl module as the peer in both roles: TLS 1.3 and 1.2 negotiation, ALPN agreement and fatal-alert on no overlap, chain and hostname verification, client identity acceptance and rejection, bulk and readiness-driven transfer through the record layer, and a bad-certificate corpus that both implementations must reject."),
 }
 
 
@@ -864,7 +1146,7 @@ def write_html_report():
 
     h.append('<section class="gaps"><h2>Known gaps (tracked, not silent)</h2><ul>')
     for k, v in HTML_GAPS:
-        h.append(f"<li><strong>{esc(k)}</strong> &mdash; {esc(v)}</li>")
+        h.append(f"<li><strong>{esc(k)}.</strong> {esc(v)}</li>")
     h.append("</ul></section>")
     h.append(
         "<footer>Generated by compliance/run_compliance.py &middot; "
@@ -917,7 +1199,7 @@ def write_report() -> bool:
         lines += ["", f"## `{section}` ({p}/{len(rows)})", "",
                   "| Check | Result |", "|---|---|"]
         for name, ok, detail in rows:
-            mark = "✅ pass" if ok else f"❌ fail — {detail[:160]}"
+            mark = "✅ pass" if ok else f"❌ fail: {detail[:160]}"
             lines.append(f"| {name} | {mark} |")
     lines += [
         "",

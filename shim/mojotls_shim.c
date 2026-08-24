@@ -142,6 +142,17 @@ void *mts_ctx_new_client(void) {
     return c;
 }
 
+/* Library callers cannot answer an interactive PEM password prompt. Refuse
+ * encrypted keys now. A future passphrase API can replace this callback with
+ * one that copies an explicit caller-owned secret. */
+static int mts_reject_password(char *buf, int size, int rwflag,
+                               void *userdata) {
+    (void)rwflag;
+    (void)userdata;
+    if (buf && size > 0) buf[0] = '\0';
+    return 0;
+}
+
 void *mts_ctx_new_server(const char *cert_chain_pem, const char *key_pem) {
     mts_ctx *c = calloc(1, sizeof(mts_ctx));
     if (!c) return NULL;
@@ -160,6 +171,21 @@ void *mts_ctx_new_server(const char *cert_chain_pem, const char *key_pem) {
         return NULL;
     }
     return c;
+}
+
+int mts_ctx_load_identity(void *p, const char *cert_chain_pem,
+                          const char *key_pem) {
+    mts_ctx *c = (mts_ctx *)p;
+    ERR_clear_error();
+    SSL_CTX_set_default_passwd_cb(c->ctx, mts_reject_password);
+    SSL_CTX_set_default_passwd_cb_userdata(c->ctx, NULL);
+    if (SSL_CTX_use_certificate_chain_file(c->ctx, cert_chain_pem) != 1)
+        return -1;
+    if (SSL_CTX_use_PrivateKey_file(c->ctx, key_pem, SSL_FILETYPE_PEM) != 1)
+        return -1;
+    if (SSL_CTX_check_private_key(c->ctx) != 1) return -1;
+    ERR_clear_error();
+    return 0;
 }
 
 int mts_ctx_load_ca(void *p, const char *ca_pem_path) {
@@ -239,7 +265,7 @@ void *mts_ssl_new(void *p, int fd) {
 
 /* sni also enables RFC 6125 hostname verification against the peer
  * certificate; pass an empty string to skip both. This is separate from
- * SSL_connect because a resumable handshake configures the name once. */
+ * SSL_connect because a nonblocking handshake configures the name once. */
 int mts_ssl_set_connect_name(void *s, const char *sni) {
     SSL *ssl = ((mts_ssl *)s)->ssl;
     if (sni && sni[0]) {

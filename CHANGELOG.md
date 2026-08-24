@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Added client certificate presentation with construction-time certificate
+  and key validation.
+- Client certificate chains may include intermediate certificates. Encrypted
+  private keys fail without an interactive prompt.
+- Added differential checks against CPython for trusted chains and rejected
+  missing, untrusted, wrong-purpose, mismatched, and encrypted-key
+  configurations.
+
 ## 0.2.3 - 2026-08-22
 
 - Prevented reset TLS peers from terminating Linux servers with SIGPIPE.

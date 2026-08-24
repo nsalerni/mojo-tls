@@ -11,9 +11,10 @@
 """TLS for Mojo 1.0 over libssl.
 
 Client and server handshakes, SNI with hostname verification, ALPN on
-both roles, and trust-store or custom-CA verification, wrapped around
-mojo-net's `TCPStream`. `TLSHandshake` supports readiness-driven progress,
-and `TLSStream` conforms to `ReadinessStream` as well as `IOStream`.
+both roles, trust-store or custom-CA verification, and optional client
+certificate presentation, wrapped around mojo-net's `TCPStream`.
+`TLSHandshake` supports readiness-driven progress, and `TLSStream` conforms
+to `ReadinessStream` as well as `IOStream`.
 
 Example (client):
 

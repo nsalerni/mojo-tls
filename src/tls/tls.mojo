@@ -122,6 +122,8 @@ struct TLSContext(Movable):
         *,
         verify: Bool = True,
         ca_file: String = "",
+        cert_chain_pem: String = "",
+        key_pem: String = "",
         alpn: List[String] = List[String](),
     ) raises -> TLSContext:
         """Builds a client-side context.
@@ -131,14 +133,22 @@ struct TLSContext(Movable):
                 given to `connect`, the hostname). Disable only in tests.
             ca_file: PEM bundle of trust anchors; empty uses the
                 environment's default trust store.
+            cert_chain_pem: Client certificate chain to present when the
+                server requests one. Must be paired with `key_pem`.
+            key_pem: Unencrypted private key for `cert_chain_pem`. Encrypted
+                keys fail without prompting for a passphrase.
             alpn: Protocols to offer, most preferred first (e.g. "h2").
 
         Returns:
             The configured context.
 
         Raises:
-            If the shim, trust store, or ALPN configuration fails.
+            If the shim, trust store, identity, or ALPN configuration fails.
         """
+        if (cert_chain_pem == "") != (key_pem == ""):
+            raise Error(
+                "tls: client certificate and key must be provided together"
+            )
         var lib = OwnedDLHandle(_shim_path())
         var ctx = lib.get_function[UInt64]("mts_ctx_new_client")()
         if ctx == 0:
@@ -161,6 +171,18 @@ struct TLSContext(Movable):
         out._lib.get_function[NoneType]("mts_ctx_set_verify")(
             out._ctx, c_int(1 if verify else 0)
         )
+        if cert_chain_pem != "":
+            var cert = cert_chain_pem.copy()
+            var key = key_pem.copy()
+            var rc = out._lib.get_function[c_int]("mts_ctx_load_identity")(
+                out._ctx,
+                cert.as_c_string_slice(),
+                key.as_c_string_slice(),
+            )
+            if Int(rc) != 0:
+                raise _shim_error(
+                    out._lib, "tls: loading client certificate/key"
+                )
         out._set_alpn(alpn)
         return out^
 
@@ -242,7 +264,7 @@ struct TLSContext(Movable):
             sni: Server name for SNI and hostname verification.
 
         Returns:
-            A resumable client handshake.
+            A client handshake that advances with socket readiness.
 
         Raises:
             If the TLS session or hostname configuration fails.
@@ -293,7 +315,7 @@ struct TLSContext(Movable):
             tcp: The accepted stream; ownership is taken.
 
         Returns:
-            A resumable server handshake.
+            A server handshake that advances with socket readiness.
 
         Raises:
             If the TLS session cannot be created.
