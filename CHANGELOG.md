@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.4 - 2026-08-24
+
 - Added owned peer leaf certificate snapshots to `TLSStream`, including the
   connection's verification status and matched hostname.
 - Added CPython checks for peer certificate identity in both roles under TLS
