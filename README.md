@@ -16,8 +16,8 @@ with the same Poller used for plain sockets.
 
 The tested [non-blocking TLS echo example](examples/nonblocking_tls_echo.mojo)
 drives a verified client and server on one Poller. It demonstrates SNI,
-hostname verification, h2 ALPN negotiation, resumable handshakes, and partial
-encrypted I/O over a loopback connection.
+hostname verification, h2 ALPN negotiation, non-blocking handshake progress,
+and partial encrypted I/O over a loopback connection.
 
 ```sh
 python3 tools/fetch_deps.py
@@ -60,7 +60,7 @@ other end of the connection, in both roles:
 - chain and hostname verification, with a generated bad-certificate
   corpus (self-signed, wrong hostname) that both implementations must
   reject for the same reasons
-- resumable handshakes, an 8 MiB partial-I/O exchange, and a bounded
+- non-blocking handshake progress, an 8 MiB partial-I/O exchange, and a bounded
   WANT_WRITE backpressure probe against CPython TLS peers
 
 Current results: [COMPLIANCE.md](COMPLIANCE.md).
@@ -74,7 +74,7 @@ pixi run compliance           # differential vs CPython ssl; rewrites COMPLIANCE
 ## Status
 
 Built for [grpc-mojo](https://github.com/nsalerni/grpc-mojo), where it
-will carry gRPC over TLS. Not here yet: client certificates (mTLS) and
+carries gRPC over TLS. Not here yet: client certificates (mTLS) and
 session resumption; see [ROADMAP.md](ROADMAP.md).
 
 ## License
