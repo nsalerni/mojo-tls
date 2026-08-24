@@ -37,6 +37,12 @@ COMPLIANCE_BADGE = ROOT / "compliance-badge.json"
 
 EXPECTED_TLS_CHECKS = (
     "mojo client vs CPython server: TLSv1.3, ALPN h2, 256KB echo",
+    "Mojo client copies the verified CPython server leaf under TLS 1.3",
+    "Mojo client copies the verified CPython server leaf under TLS 1.2",
+    "Mojo server copies the verified CPython client leaf under TLS 1.3",
+    "Mojo server copies the verified CPython client leaf under TLS 1.2",
+    "Mojo server reports no peer certificate when CPython sends none",
+    "Mojo does not mark a CPython certificate verified when verification is disabled",
     "nonblocking Mojo client presents a trusted certificate chain to CPython",
     "CPython rejects a Mojo client without a required certificate",
     "CPython rejects an untrusted Mojo client certificate",
@@ -70,10 +76,10 @@ def record(section: str, name: str, ok: bool, detail: str = ""):
     print(f"  {'PASS' if ok else 'FAIL'} [{section}] {name}" + ("" if ok else f"  <- {detail}"))
 
 
-def compliance_badge_payload(
+def tls_result_summary(
     results: dict[str, list[tuple[str, bool, str]]],
-) -> dict[str, object]:
-    """Build a Shields endpoint payload from the recorded TLS checks."""
+) -> tuple[int, int, bool, bool, bool]:
+    """Count registered checks and reject incomplete or malformed results."""
     rows = results.get("tls", [])
     observed: dict[str, bool] = {}
     duplicate = False
@@ -93,8 +99,16 @@ def compliance_badge_payload(
         and not duplicate
         and not unexpected
     )
-    all_passed = valid and passed == len(EXPECTED_TLS_CHECKS)
-    message = f"{passed}/{len(EXPECTED_TLS_CHECKS)} checks"
+    return passed, len(EXPECTED_TLS_CHECKS), valid, duplicate, bool(unexpected)
+
+
+def compliance_badge_payload(
+    results: dict[str, list[tuple[str, bool, str]]],
+) -> dict[str, object]:
+    """Build a Shields endpoint payload from the recorded TLS checks."""
+    passed, total, valid, duplicate, unexpected = tls_result_summary(results)
+    all_passed = valid and passed == total
+    message = f"{passed}/{total} checks"
     if duplicate or unexpected:
         message = "results invalid"
     return {
@@ -255,6 +269,47 @@ def build_tools():
     MOJO_RUN = ["mojo", "run", "-I", "src", "-I", str(dep_path("mojo-net"))]
 
 
+def parse_peer_line(output: str) -> dict[str, object]:
+    lines = [line for line in output.splitlines() if line.startswith("PEER ")]
+    if len(lines) != 1:
+        return {"error": f"expected one PEER line, found {len(lines)}"}
+    if lines[0] == "PEER NONE":
+        return {"present": False}
+    parts = lines[0].split()
+    if len(parts) != 5 or parts[0] != "PEER":
+        return {"error": "malformed PEER line"}
+    if parts[1] not in ("VERIFIED", "UNVERIFIED"):
+        return {"error": "invalid peer verification status"}
+    try:
+        der_length = int(parts[3])
+    except ValueError:
+        return {"error": "invalid peer DER length"}
+    if der_length <= 0 or parts[4] not in ("MATCH", "MISMATCH"):
+        return {"error": "invalid peer DER result"}
+    return {
+        "present": True,
+        "verified": parts[1] == "VERIFIED",
+        "matched_name": "" if parts[2] == "-" else parts[2],
+        "der_length": der_length,
+        "der_matches": parts[4] == "MATCH",
+    }
+
+
+def peer_detail(result: dict) -> str:
+    peer = result.get("peer", {})
+    if not isinstance(peer, dict):
+        peer = {"error": "invalid peer result"}
+    return (
+        f"rc={result.get('rc')!r} version={result.get('version')!r} "
+        f"alpn={result.get('alpn')!r} echo={result.get('echo_ok')!r} "
+        f"present={peer.get('present')!r} verified={peer.get('verified')!r} "
+        f"name={peer.get('matched_name')!r} "
+        f"der_len={peer.get('der_length')!r} "
+        f"der_match={peer.get('der_matches')!r} "
+        f"peer_error={peer.get('error')!r} error={result.get('error')!r}"
+    )
+
+
 # ------------------------------------------------------------------ tls ---
 
 def py_server_ctx(
@@ -353,6 +408,134 @@ def py_receive_then_echo(ctx, size: int, results: dict):
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
     return thread
+
+
+def mojo_client_peer_snapshot(
+    tls_version: ssl.TLSVersion,
+    *,
+    expected_der: bytes,
+    verify: bool = True,
+) -> dict:
+    cert = "server.pem" if verify else "selfsigned.pem"
+    key = "server.key" if verify else "selfsigned.key"
+    results = {"ready": threading.Event()}
+    thread = py_receive_then_echo(
+        py_server_ctx(
+            cert,
+            key,
+            ["h2"],
+            min_version=tls_version,
+            max_version=tls_version,
+        ),
+        16,
+        results,
+    )
+    results["ready"].wait(10)
+    run = run_tool(
+        "tls_peer_client",
+        results["port"],
+        str(CERTS / "ca.pem") if verify else "-",
+        "localhost",
+        expected_der.hex(),
+        timeout=60,
+    )
+    thread.join(timeout=30)
+    lines = run.stdout.splitlines()
+    return {
+        "rc": run.returncode,
+        "version": next(
+            (line.removeprefix("VERSION ") for line in lines
+             if line.startswith("VERSION ")),
+            None,
+        ),
+        "alpn": next(
+            (line.removeprefix("ALPN ") for line in lines
+             if line.startswith("ALPN ")),
+            None,
+        ),
+        "echo_ok": "OK" in lines,
+        "peer": parse_peer_line(run.stdout),
+        "error": run.stderr[:150] or results.get("error"),
+        "thread_alive": thread.is_alive(),
+    }
+
+
+def python_client_peer_snapshot(
+    tls_version: ssl.TLSVersion,
+    *,
+    present_client_cert: bool,
+    require_client_cert: bool,
+    expected_der: bytes | None,
+) -> dict:
+    process = subprocess.Popen(
+        [
+            *MOJO_RUN,
+            str(TOOLS / "tls_peer_server.mojo"),
+            str(CERTS / "server.pem"),
+            str(CERTS / "server.key"),
+            str(CERTS / "ca.pem") if require_client_cert else "-",
+            expected_der.hex() if expected_der is not None else "-",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=ROOT,
+    )
+    result: dict[str, object] = {}
+    tls = None
+    raw = None
+    first_line = ""
+    try:
+        first_line = read_process_line(process)
+        if not first_line.startswith("PORT "):
+            raise RuntimeError("malformed peer server startup")
+        port = int(first_line.removeprefix("PORT "))
+        context = ssl.create_default_context(cafile=str(CERTS / "ca.pem"))
+        context.minimum_version = tls_version
+        context.maximum_version = tls_version
+        context.set_alpn_protocols(["h2"])
+        if present_client_cert:
+            context.load_cert_chain(
+                str(CERTS / "client-chain.pem"),
+                str(CERTS / "client.key"),
+            )
+        raw = socket.create_connection(("127.0.0.1", port), timeout=10)
+        tls = context.wrap_socket(raw, server_hostname="localhost")
+        raw = None
+        tls.settimeout(10)
+        result["version"] = tls.version()
+        result["alpn"] = tls.selected_alpn_protocol()
+        payload = bytes((index * 23 + 7) % 256 for index in range(16))
+        tls.sendall(payload)
+        echoed = bytearray()
+        while len(echoed) < len(payload):
+            chunk = tls.recv(len(payload) - len(echoed))
+            if not chunk:
+                break
+            echoed.extend(chunk)
+        result["echo_ok"] = bytes(echoed) == payload
+    except Exception as error:
+        result["error"] = repr(error)
+    finally:
+        if tls is not None:
+            tls.close()
+        elif raw is not None:
+            raw.close()
+        if process.poll() is None and "error" in result:
+            process.kill()
+
+    try:
+        stdout, stderr = process.communicate(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        stdout, stderr = process.communicate()
+        result["error"] = "peer server timed out"
+    output = first_line + "\n" + stdout
+    result["rc"] = process.returncode
+    result["peer"] = parse_peer_line(output)
+    if stderr and "error" not in result:
+        result["error"] = stderr[:150]
+    return result
 
 
 def mojo_client_rejected_by_required_python_server(
@@ -595,6 +778,110 @@ def section_tls():
            r.returncode == 0 and "VERSION TLSv1.3" in r.stdout
            and "ALPN h2" in r.stdout and f"OK {n}" in r.stdout,
            f"rc={r.returncode} out={r.stdout.strip()!r} err={r.stderr[:150]!r}")
+
+    expected_server_der = ssl.PEM_cert_to_DER_cert(
+        (CERTS / "server.pem").read_text()
+    )
+    expected_client_der = ssl.PEM_cert_to_DER_cert(
+        (CERTS / "client.pem").read_text()
+    )
+
+    for tls_version, label in (
+        (ssl.TLSVersion.TLSv1_3, "TLS 1.3"),
+        (ssl.TLSVersion.TLSv1_2, "TLS 1.2"),
+    ):
+        identity = mojo_client_peer_snapshot(
+            tls_version, expected_der=expected_server_der
+        )
+        peer = identity["peer"]
+        record(
+            "tls",
+            f"Mojo client copies the verified CPython server leaf under {label}",
+            identity.get("rc") == 0
+            and identity.get("version") == label.replace(" ", "v")
+            and identity.get("alpn") == "h2"
+            and identity.get("echo_ok") is True
+            and not identity.get("error")
+            and peer.get("present") is True
+            and peer.get("verified") is True
+            and peer.get("matched_name") == "localhost"
+            and peer.get("der_length") == len(expected_server_der)
+            and peer.get("der_matches") is True
+            and identity.get("thread_alive") is False,
+            peer_detail(identity),
+        )
+
+    for tls_version, label in (
+        (ssl.TLSVersion.TLSv1_3, "TLS 1.3"),
+        (ssl.TLSVersion.TLSv1_2, "TLS 1.2"),
+    ):
+        identity = python_client_peer_snapshot(
+            tls_version,
+            present_client_cert=True,
+            require_client_cert=True,
+            expected_der=expected_client_der,
+        )
+        peer = identity["peer"]
+        record(
+            "tls",
+            f"Mojo server copies the verified CPython client leaf under {label}",
+            identity.get("rc") == 0
+            and identity.get("version") == label.replace(" ", "v")
+            and identity.get("alpn") == "h2"
+            and identity.get("echo_ok") is True
+            and not identity.get("error")
+            and peer.get("present") is True
+            and peer.get("verified") is True
+            and peer.get("matched_name") == ""
+            and peer.get("der_length") == len(expected_client_der)
+            and peer.get("der_matches") is True,
+            peer_detail(identity),
+        )
+
+    identity = python_client_peer_snapshot(
+        ssl.TLSVersion.TLSv1_3,
+        present_client_cert=False,
+        require_client_cert=False,
+        expected_der=None,
+    )
+    peer = identity["peer"]
+    record(
+        "tls",
+        "Mojo server reports no peer certificate when CPython sends none",
+        identity.get("rc") == 0
+        and identity.get("version") == "TLSv1.3"
+        and identity.get("alpn") == "h2"
+        and identity.get("echo_ok") is True
+        and not identity.get("error")
+        and peer.get("present") is False,
+        peer_detail(identity),
+    )
+
+    expected_selfsigned_der = ssl.PEM_cert_to_DER_cert(
+        (CERTS / "selfsigned.pem").read_text()
+    )
+    identity = mojo_client_peer_snapshot(
+        ssl.TLSVersion.TLSv1_3,
+        expected_der=expected_selfsigned_der,
+        verify=False,
+    )
+    peer = identity["peer"]
+    record(
+        "tls",
+        "Mojo does not mark a CPython certificate verified when verification is disabled",
+        identity.get("rc") == 0
+        and identity.get("version") == "TLSv1.3"
+        and identity.get("alpn") == "h2"
+        and identity.get("echo_ok") is True
+        and not identity.get("error")
+        and peer.get("present") is True
+        and peer.get("verified") is False
+        and peer.get("matched_name") == ""
+        and peer.get("der_length") == len(expected_selfsigned_der)
+        and peer.get("der_matches") is True
+        and identity.get("thread_alive") is False,
+        peer_detail(identity),
+    )
 
     # Client identity support is judged by a strict CPython server. The
     # successful case uses the nonblocking Mojo handshake path. Rejection
@@ -1319,36 +1606,46 @@ HTML_THESIS = (
 )
 HTML_GAPS = [
     (
-        "Peer certificate identity",
-        "Both roles can authenticate certificates, but applications cannot inspect the verified peer identity yet.",
+        "Structured certificate names",
+        "Applications can inspect the exact verified leaf certificate, but typed subject alternative names are not exposed yet.",
     ),
     ("Session resumption", "Every connection is a full handshake for now."),
 ]
 HTML_SECTIONS = {
     "tls": ("`tls` vs CPython `ssl`",
-            "Live connections with CPython's ssl module as the peer in both roles: TLS 1.3 and 1.2 negotiation, ALPN agreement and fatal-alert on no overlap, chain and hostname verification, client certificate authentication in both roles, bulk and readiness-driven transfer through the record layer, and a bad-certificate corpus that both implementations must reject."),
+            "Live connections with CPython's ssl module as the peer in both roles: TLS 1.3 and 1.2 negotiation, ALPN agreement and fatal-alert on no overlap, chain and hostname verification, exact peer leaf certificate copies, client certificate authentication in both roles, bulk and readiness-driven transfer through the record layer, and a bad-certificate corpus that both implementations must reject."),
 }
 
 
-def write_html_report():
-    total = sum(len(v) for v in RESULTS.values())
-    passed = sum(1 for v in RESULTS.values() for _, ok, _ in v if ok)
+def write_html_report() -> bool:
+    passed, total, valid, _, _ = tls_result_summary(RESULTS)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    all_ok = passed == total
+    all_ok = valid and passed == total
+    verdict = "checks passed" if valid else "registered checks passed; results incomplete"
     h = [HTML_HEAD, "<main>", "<header>"]
     h.append(f'<p class="eyebrow">{HTML_EYEBROW}</p>')
     h.append(f"<h1>{HTML_H1}</h1>")
     h.append(
         f'<div class="verdict"><span class="score{"" if all_ok else " failing"}">'
-        f"{passed}/{total}</span><span>checks passed</span>"
+        f"{passed}/{total}</span><span>{verdict}</span>"
         f'<span class="when">{now}</span></div>'
     )
     h.append(f'<p class="thesis">{HTML_THESIS}</p>')
     h.append('<ul class="scorecard">')
     for section, rows in RESULTS.items():
-        p = sum(1 for _, ok, _ in rows if ok)
-        cls = "" if p == len(rows) else " failing"
-        h.append(f'<li>{esc(section)} <span class="n{cls}">{p}/{len(rows)}</span></li>')
+        if section == "tls":
+            section_passed = passed
+            section_total = total
+            section_ok = all_ok
+        else:
+            section_passed = sum(1 for _, ok, _ in rows if ok)
+            section_total = len(rows)
+            section_ok = False
+        cls = "" if section_ok else " failing"
+        h.append(
+            f'<li>{esc(section)} <span class="n{cls}">'
+            f"{section_passed}/{section_total}</span></li>"
+        )
     h.append("</ul></header>")
 
     for section, rows in RESULTS.items():
@@ -1387,6 +1684,7 @@ def write_html_report():
     h.append("</main>")
     HTML_REPORT.write_text("\n".join(h))
     print(f"report: {HTML_REPORT.relative_to(ROOT)}")
+    return all_ok
 
 
 # --------------------------------------------------------------- report ---
@@ -1402,16 +1700,16 @@ def versions() -> dict[str, str]:
 
 
 def write_report() -> bool:
-    total = sum(len(v) for v in RESULTS.values())
-    passed = sum(1 for v in RESULTS.values() for _, ok, _ in v if ok)
+    passed, total, valid, _, _ = tls_result_summary(RESULTS)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    verdict = "checks passed" if valid else "registered checks passed; results incomplete"
     lines = [
         "# mojo-tls Compliance Report",
         "",
         "<!-- GENERATED by compliance/run_compliance.py; do not edit. -->",
         "<!-- Regenerate with: pixi run compliance -->",
         "",
-        f"**Result: {passed}/{total} checks passed.** Generated {now}.",
+        f"**Result: {passed}/{total} {verdict}.** Generated {now}.",
         "",
         "Every check runs against CPython's `ssl` module on the other end of",
         "the connection: handshakes, version negotiation, ALPN, certificate",
@@ -1426,8 +1724,13 @@ def write_report() -> bool:
     for k, v in versions().items():
         lines.append(f"| {k} | {v} |")
     for section, rows in RESULTS.items():
-        p = sum(1 for _, ok, _ in rows if ok)
-        lines += ["", f"## `{section}` ({p}/{len(rows)})", "",
+        if section == "tls":
+            section_passed = passed
+            section_total = total
+        else:
+            section_passed = sum(1 for _, ok, _ in rows if ok)
+            section_total = len(rows)
+        lines += ["", f"## `{section}` ({section_passed}/{section_total})", "",
                   "| Check | Result |", "|---|---|"]
         for name, ok, detail in rows:
             mark = "✅ pass" if ok else f"❌ fail: {detail[:160]}"
@@ -1443,7 +1746,7 @@ def write_report() -> bool:
     ]
     REPORT.write_text("\n".join(lines))
     print(f"report: {REPORT}")
-    return passed == total
+    return valid and passed == total
 
 
 def main() -> int:
@@ -1453,8 +1756,8 @@ def main() -> int:
     setup()
     build_tools()
     section_tls()
-    ok = write_report()
-    write_html_report()
+    markdown_ok = write_report()
+    html_ok = write_html_report()
     badge_ok = write_compliance_badge()
     if args.json:
         Path(args.json).write_text(json.dumps(
@@ -1462,7 +1765,7 @@ def main() -> int:
                           for s, rows in RESULTS.items()}}))
     print(f"\ncompliance: {sum(1 for v in RESULTS.values() for _, o, _ in v if o)}"
           f"/{sum(len(v) for v in RESULTS.values())} checks passed")
-    return 0 if ok and badge_ok else 1
+    return 0 if markdown_ok and html_ok and badge_ok else 1
 
 
 if __name__ == "__main__":

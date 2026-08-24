@@ -50,6 +50,9 @@ typedef struct {
     mts_ctx *config;
 } mts_ssl;
 
+#define MTS_MAX_PEER_CERT_DER (1024 * 1024)
+#define MTS_MAX_PEER_NAME 4096
+
 /* OpenSSL's socket BIO uses write(2), so a peer reset can raise SIGPIPE on
  * Linux before libssl returns SSL_ERROR_SYSCALL. Block the signal only on
  * the calling thread and consume it only when this operation created it.
@@ -393,6 +396,78 @@ int mts_ssl_version(void *s, char *buf, int cap) {
 
 long mts_ssl_verify_result(void *s) {
     return SSL_get_verify_result(((mts_ssl *)s)->ssl);
+}
+
+/* Returns the DER length of the peer's leaf certificate, 0 when the peer did
+ * not present one, or a negative value on encoding or size failure. The X509
+ * reference stays inside this call. */
+int mts_ssl_peer_certificate_der_size(void *s) {
+    ERR_clear_error();
+    X509 *cert = SSL_get1_peer_certificate(((mts_ssl *)s)->ssl);
+    if (!cert) {
+        ERR_clear_error();
+        return 0;
+    }
+    int length = i2d_X509(cert, NULL);
+    X509_free(cert);
+    if (length <= 0) return -1;
+    if (length > MTS_MAX_PEER_CERT_DER) {
+        ERR_clear_error();
+        return -2;
+    }
+    ERR_clear_error();
+    return length;
+}
+
+/* Copies the peer leaf certificate into caller-owned storage. No OpenSSL
+ * allocation or borrowed pointer crosses this boundary. */
+int mts_ssl_peer_certificate_der(void *s, unsigned char *out, int cap) {
+    if (!out || cap <= 0 || cap > MTS_MAX_PEER_CERT_DER) return -1;
+
+    ERR_clear_error();
+    X509 *cert = SSL_get1_peer_certificate(((mts_ssl *)s)->ssl);
+    if (!cert) {
+        ERR_clear_error();
+        return 0;
+    }
+    int needed = i2d_X509(cert, NULL);
+    if (needed <= 0 || needed > MTS_MAX_PEER_CERT_DER || needed > cap) {
+        X509_free(cert);
+        return -1;
+    }
+    unsigned char *cursor = out;
+    int written = i2d_X509(cert, &cursor);
+    X509_free(cert);
+    if (written != needed) return -1;
+    ERR_clear_error();
+    return written;
+}
+
+/* Verification success is meaningful only when a certificate exists and the
+ * session was configured to verify the peer. SSL_get_verify_result alone can
+ * report X509_V_OK when verification was disabled. */
+int mts_ssl_peer_certificate_verified(void *s) {
+    SSL *ssl = ((mts_ssl *)s)->ssl;
+    X509 *cert = SSL_get1_peer_certificate(ssl);
+    if (!cert) return 0;
+    X509_free(cert);
+    if ((SSL_get_verify_mode(ssl) & SSL_VERIFY_PEER) == 0) return 0;
+    return SSL_get_verify_result(ssl) == X509_V_OK ? 1 : 0;
+}
+
+/* Copies the certificate name matched by OpenSSL hostname verification. The
+ * borrowed SSL_get0_peername pointer never leaves this function. */
+int mts_ssl_peer_name(void *s, char *out, int cap) {
+    if (!out || cap <= 0 || cap > MTS_MAX_PEER_NAME) return -1;
+    if (mts_ssl_peer_certificate_verified(s) != 1) return 0;
+
+    const char *name = SSL_get0_peername(((mts_ssl *)s)->ssl);
+    if (!name) return 0;
+    size_t length = 0;
+    while (length < (size_t)cap && name[length] != '\0') length++;
+    if (length == (size_t)cap) return -1;
+    memcpy(out, name, length);
+    return (int)length;
 }
 
 int mts_ssl_shutdown(void *s) {
