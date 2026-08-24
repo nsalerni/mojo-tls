@@ -85,6 +85,13 @@ def test_handshake_echo_alpn() raises:
     var stream = ctx.connect(tcp^, "localhost")
     assert_true(stream.version().startswith("TLSv1."), stream.version())
     assert_equal(stream.negotiated_alpn(), "h2")
+    var peer = stream.peer_certificate()
+    if not peer:
+        raise Error("verified TLS client receives a server certificate")
+    var certificate = peer.value().copy()
+    assert_true(len(certificate.leaf_der) > 0)
+    assert_true(certificate.verified)
+    assert_equal(certificate.matched_name, "localhost")
 
     stream.write_all("sixteen tls byte".as_bytes())
     assert_equal(String(from_utf8=stream.read_exact(16)), "sixteen tls byte")
@@ -98,6 +105,17 @@ def test_handshake_echo_alpn() raises:
         assert_equal(got[0], 0x3C)
 
     stream.close()
+    assert_true(
+        len(certificate.leaf_der) > 0,
+        "certificate snapshot remains owned after stream close",
+    )
+    var closed_raised = False
+    try:
+        _ = stream.peer_certificate()
+    except error:
+        closed_raised = True
+        assert_true("after close" in String(error), String(error))
+    assert_true(closed_raised, "closed stream rejects certificate access")
     reap(server[1])
 
 
@@ -184,6 +202,11 @@ def test_verify_disabled_accepts_selfsigned() raises:
     var ctx = TLSContext.client(verify=False)
     var tcp = TCPStream.connect("127.0.0.1", server[0])
     var stream = ctx.connect(tcp^, "localhost")
+    var peer = stream.peer_certificate()
+    if not peer:
+        raise Error("unverified TLS still exposes the presented certificate")
+    assert_true(not peer.value().verified)
+    assert_equal(peer.value().matched_name, "")
     stream.write_all("ok".as_bytes())
     assert_equal(String(from_utf8=stream.read_exact(2)), "ok")
     stream.close()
@@ -313,6 +336,15 @@ def test_nonblocking_handshake_and_partial_io() raises:
     accepts_readiness_stream(server)
     assert_equal(client.negotiated_alpn(), "h2")
     assert_equal(server.negotiated_alpn(), "h2")
+    var client_peer = client.peer_certificate()
+    if not client_peer:
+        raise Error("verified TLS client receives a server certificate")
+    assert_true(client_peer.value().verified)
+    assert_equal(client_peer.value().matched_name, "localhost")
+    assert_true(
+        not server.peer_certificate(),
+        "server receives no certificate without client authentication",
+    )
 
     var empty = List[Byte](length=1, fill=0)
     var blocked = False

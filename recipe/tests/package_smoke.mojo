@@ -3,7 +3,7 @@ from std.sys import argv
 from std.testing import assert_equal, assert_true
 
 from net import TCPListener, TCPStream
-from tls import TLSContext
+from tls import PeerCertificate, TLSContext
 
 
 def run_server(
@@ -23,6 +23,14 @@ def run_server(
             )
             var tcp = listener.accept()
             var stream = context.accept(tcp^)
+            var peer = stream.peer_certificate()
+            if not peer:
+                raise Error("installed server did not receive client identity")
+            var identity: PeerCertificate = peer.value().copy()
+            if not identity.verified or len(identity.leaf_der) == 0:
+                raise Error("installed server did not verify client identity")
+            if identity.matched_name != "":
+                raise Error("server client identity had a matched hostname")
             var request = stream.read_exact(4)
             stream.write_all(Span(request))
             stream.close()
@@ -52,12 +60,20 @@ def main() raises:
     )
     var tcp = TCPStream.connect("127.0.0.1", server[0])
     var stream = context.connect(tcp^, "localhost")
+    var peer = stream.peer_certificate()
+    if not peer:
+        raise Error("installed client did not receive server identity")
+    var identity: PeerCertificate = peer.value().copy()
+    assert_true(identity.verified)
+    assert_true(len(identity.leaf_der) > 0)
+    assert_equal(identity.matched_name, "localhost")
 
     assert_true(stream.version().startswith("TLSv1."), stream.version())
     assert_equal(stream.negotiated_alpn(), "h2")
     stream.write_all("ping".as_bytes())
     assert_equal(String(from_utf8=stream.read_exact(4)), "ping")
     stream.close()
+    assert_true(len(identity.leaf_der) > 0)
 
     var status = c_int(0)
     var waited = external_call["waitpid", c_int](

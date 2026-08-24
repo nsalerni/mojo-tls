@@ -62,6 +62,27 @@ var context = TLSContext.server(
 `client_ca_file` and `require_client_cert=True` must be provided together.
 The default server configuration does not request a client certificate.
 
+After a handshake, `TLSStream.peer_certificate()` returns an owned snapshot of
+the peer's leaf certificate:
+
+```mojo
+var peer = stream.peer_certificate()
+if not peer or not peer.value().verified:
+    raise Error("verified peer certificate required")
+var identity = peer.value().copy()
+# Compare identity.leaf_der with an allowed certificate.
+```
+
+`leaf_der` contains the exact leaf certificate bytes and remains valid after
+the stream closes. It does not include the certificate chain. `verified` is
+true only when this connection required peer verification and OpenSSL accepted
+the certificate. Certificate presence alone does not establish trust.
+
+On a verifying client, `matched_name` is the certificate name that OpenSSL
+matched during hostname verification. It is empty for server-side client
+certificates and connections that did not perform a hostname check. The
+package does not log certificate bytes or identity fields.
+
 ## How it works
 
 The protocol logic everywhere else in this family is pure Mojo; the
@@ -102,6 +123,8 @@ other end of the connection, in both roles:
   and TLS 1.3, with trusted chains and rejection of missing certificates,
   untrusted chains, server-only certificates, mismatched keys, and encrypted
   keys
+- owned peer leaf certificates, verification status, and matched hostnames in
+  both roles under TLS 1.2 and TLS 1.3
 - non-blocking handshake progress, an 8 MiB partial-I/O exchange, and a bounded
   WANT_WRITE backpressure probe against CPython TLS peers
 
@@ -116,7 +139,7 @@ pixi run compliance           # differential vs CPython ssl; rewrites COMPLIANCE
 ## Status
 
 Built for [grpc-mojo](https://github.com/nsalerni/grpc-mojo), which uses it
-for secure HTTP/2 and gRPC transports. Peer certificate identity access and
+for secure HTTP/2 and gRPC transports. Structured certificate name access and
 session resumption remain; see [ROADMAP.md](ROADMAP.md).
 
 ## License

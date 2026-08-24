@@ -40,6 +40,8 @@ from net.libc import os_error
 comptime _WANT_READ = -2
 comptime _WANT_WRITE = -3
 comptime _SYSCALL_ERROR = -5
+comptime _MAX_PEER_CERT_DER = 1024 * 1024
+comptime _MAX_PEER_NAME = 4096
 
 
 def _shim_filename() -> String:
@@ -103,6 +105,23 @@ def _alpn_wire(protocols: List[String]) raises -> List[Byte]:
         out.append(UInt8(len(bytes)))
         out.extend(bytes)
     return out^
+
+
+@fieldwise_init
+struct PeerCertificate(Copyable, Movable):
+    """An owned snapshot of the peer's leaf certificate.
+
+    The bytes and matched name are copied out of libssl. They remain valid
+    after the TLS stream closes. Certificate presence alone does not establish
+    trust, so authorization code must check `verified`.
+    """
+
+    var leaf_der: List[Byte]
+    """The peer leaf certificate in DER form, excluding its chain."""
+    var verified: Bool
+    """Whether this session required peer verification and it succeeded."""
+    var matched_name: String
+    """The certificate name matched by hostname verification, if any."""
 
 
 @fieldwise_init
@@ -702,6 +721,67 @@ struct TLSStream(ReadinessStream):
         )
         buf.shrink(Int(n))
         return String(from_utf8=buf)
+
+    def peer_certificate(self) raises -> Optional[PeerCertificate]:
+        """Copies the peer's leaf certificate and verification status.
+
+        Returns:
+            An owned certificate snapshot, or None when the peer did not
+            present a certificate. A server that does not request client
+            authentication normally receives None.
+
+        Raises:
+            If the stream is closed, the certificate is too large, or libssl
+            cannot encode or copy the certificate.
+        """
+        if not self._open:
+            raise Error("tls: peer certificate requested after close")
+
+        var length = Int(
+            self._lib.get_function[c_int]("mts_ssl_peer_certificate_der_size")(
+                self._ssl
+            )
+        )
+        if length == 0:
+            return None
+        if length == -2:
+            raise Error("tls: peer certificate exceeds 1 MiB")
+        if length < 0:
+            raise _shim_error(self._lib, "tls: encoding peer certificate")
+
+        var der = List[Byte](length=length, fill=0)
+        var copied = Int(
+            self._lib.get_function[c_int]("mts_ssl_peer_certificate_der")(
+                self._ssl, der.unsafe_ptr(), c_int(length)
+            )
+        )
+        if copied != length:
+            raise _shim_error(self._lib, "tls: copying peer certificate")
+
+        var verified_value = Int(
+            self._lib.get_function[c_int]("mts_ssl_peer_certificate_verified")(
+                self._ssl
+            )
+        )
+        if verified_value != 0 and verified_value != 1:
+            raise Error("tls: invalid peer verification result")
+
+        var name_bytes = List[Byte](length=_MAX_PEER_NAME, fill=0)
+        var name_length = Int(
+            self._lib.get_function[c_int]("mts_ssl_peer_name")(
+                self._ssl,
+                name_bytes.unsafe_ptr(),
+                c_int(_MAX_PEER_NAME),
+            )
+        )
+        if name_length < 0 or name_length > _MAX_PEER_NAME:
+            raise Error("tls: copying matched peer name")
+        name_bytes.shrink(name_length)
+        return PeerCertificate(
+            leaf_der=der^,
+            verified=verified_value == 1,
+            matched_name=String(from_utf8=name_bytes),
+        )
 
     def close(mut self):
         """Sends close_notify and closes the underlying stream.

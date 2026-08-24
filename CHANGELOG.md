@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added owned peer leaf certificate snapshots to `TLSStream`, including the
+  connection's verification status and matched hostname.
+- Added CPython checks for peer certificate identity in both roles under TLS
+  1.2 and TLS 1.3, plus no-certificate and verification-disabled cases.
 - Added required server-side client certificate verification against a
   configured CA, with strict X.509 checks and safe paired configuration.
 - Added live CPython client checks under TLS 1.2 and TLS 1.3 for trusted and
