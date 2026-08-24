@@ -19,6 +19,7 @@ gen-certs = "bash tools/gen_test_certs.sh"
 test = { cmd = "python3 -B compliance/test_compliance_badge.py && python3 tools/run_tests.py", depends-on = ["build-shim", "gen-certs"] }
 compliance = { cmd = "python3 compliance/run_compliance.py", depends-on = ["build-shim", "gen-certs"] }
 example = { cmd = "mojo run -I src -I \"$(python3 tools/dep_src.py mojo-net)\" examples/nonblocking_tls_echo.mojo", depends-on = ["build-shim", "gen-certs"] }
+blocking-example = { cmd = "python3 examples/run_blocking_tls_client.py", depends-on = ["build-shim", "gen-certs"] }
 package-test = "python3 packaging/test_installed_package.py"
 
 [dependencies]
