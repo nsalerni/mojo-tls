@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.0 - 2026-08-25
+
 - Added owned DNS, URI, email, and IP subject alternative names to peer
   certificate snapshots.
 - Added bounded parsing that rejects ASCII control bytes, DEL, invalid IP
