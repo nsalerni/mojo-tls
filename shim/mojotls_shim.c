@@ -27,6 +27,7 @@
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
+#include <arpa/inet.h>
 #include <errno.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -52,6 +53,14 @@ typedef struct {
 
 #define MTS_MAX_PEER_CERT_DER (1024 * 1024)
 #define MTS_MAX_PEER_NAME 4096
+#define MTS_MAX_PEER_SAN_COUNT 256
+#define MTS_MAX_PEER_SAN_BYTES (64 * 1024)
+#define MTS_MAX_PEER_SAN_VALUE 4096
+
+#define MTS_SAN_DNS 1
+#define MTS_SAN_URI 2
+#define MTS_SAN_EMAIL 3
+#define MTS_SAN_IP 4
 
 /* OpenSSL's socket BIO uses write(2), so a peer reset can raise SIGPIPE on
  * Linux before libssl returns SSL_ERROR_SYSCALL. Block the signal only on
@@ -468,6 +477,128 @@ int mts_ssl_peer_name(void *s, char *out, int cap) {
     if (length == (size_t)cap) return -1;
     memcpy(out, name, length);
     return (int)length;
+}
+
+/* Copies supported subject alternative names into caller-owned storage.
+ * Each record is a one-byte kind, a two-byte big-endian length, then the
+ * value bytes. DNS, URI, and email entries must contain printable ASCII. IP
+ * entries use the canonical text returned by inet_ntop. Other GeneralName
+ * choices are omitted. The entry count, each value, and the complete copy are
+ * bounded. */
+int mts_ssl_peer_subject_alt_names(void *s, unsigned char *out, int cap) {
+    if (!s || !out || cap <= 0 || cap > MTS_MAX_PEER_SAN_BYTES) return -1;
+
+    ERR_clear_error();
+    X509 *cert = SSL_get1_peer_certificate(((mts_ssl *)s)->ssl);
+    if (!cert) {
+        ERR_clear_error();
+        return 0;
+    }
+
+    int extension_status = -1;
+    GENERAL_NAMES *names = X509_get_ext_d2i(
+        cert, NID_subject_alt_name, &extension_status, NULL);
+    X509_free(cert);
+    if (!names) {
+        ERR_clear_error();
+        return extension_status == -1 ? 0 : -4;
+    }
+
+    int entry_count = sk_GENERAL_NAME_num(names);
+    if (entry_count == 0) {
+        GENERAL_NAMES_free(names);
+        ERR_clear_error();
+        return -4;
+    }
+    if (entry_count < 0 || entry_count > MTS_MAX_PEER_SAN_COUNT) {
+        GENERAL_NAMES_free(names);
+        ERR_clear_error();
+        return -2;
+    }
+
+    int written = 0;
+    for (int index = 0; index < entry_count; index++) {
+        GENERAL_NAME *name = sk_GENERAL_NAME_value(names, index);
+        const unsigned char *value = NULL;
+        int value_length = 0;
+        int kind = 0;
+        char ip_text[INET6_ADDRSTRLEN];
+
+        if (!name) {
+            GENERAL_NAMES_free(names);
+            ERR_clear_error();
+            return -4;
+        }
+        switch (name->type) {
+            case GEN_DNS:
+                kind = MTS_SAN_DNS;
+                value = ASN1_STRING_get0_data(name->d.dNSName);
+                value_length = ASN1_STRING_length(name->d.dNSName);
+                break;
+            case GEN_URI:
+                kind = MTS_SAN_URI;
+                value = ASN1_STRING_get0_data(name->d.uniformResourceIdentifier);
+                value_length = ASN1_STRING_length(
+                    name->d.uniformResourceIdentifier);
+                break;
+            case GEN_EMAIL:
+                kind = MTS_SAN_EMAIL;
+                value = ASN1_STRING_get0_data(name->d.rfc822Name);
+                value_length = ASN1_STRING_length(name->d.rfc822Name);
+                break;
+            case GEN_IPADD: {
+                const unsigned char *address = ASN1_STRING_get0_data(
+                    name->d.iPAddress);
+                int address_length = ASN1_STRING_length(name->d.iPAddress);
+                int family = address_length == 4 ? AF_INET : AF_INET6;
+                if ((address_length != 4 && address_length != 16) ||
+                    !address || !inet_ntop(family, address, ip_text,
+                                           sizeof(ip_text))) {
+                    GENERAL_NAMES_free(names);
+                    ERR_clear_error();
+                    return -4;
+                }
+                kind = MTS_SAN_IP;
+                value = (const unsigned char *)ip_text;
+                value_length = (int)strlen(ip_text);
+                break;
+            }
+            default:
+                continue;
+        }
+
+        if (!value || value_length <= 0 ||
+            value_length > MTS_MAX_PEER_SAN_VALUE) {
+            GENERAL_NAMES_free(names);
+            ERR_clear_error();
+            return -4;
+        }
+        if (kind != MTS_SAN_IP) {
+            for (int offset = 0; offset < value_length; offset++) {
+                if (value[offset] < 0x20 || value[offset] > 0x7e) {
+                    GENERAL_NAMES_free(names);
+                    ERR_clear_error();
+                    return -4;
+                }
+            }
+        }
+        if (written > cap - 3 - value_length ||
+            written > MTS_MAX_PEER_SAN_BYTES - 3 - value_length) {
+            GENERAL_NAMES_free(names);
+            ERR_clear_error();
+            return -3;
+        }
+
+        out[written++] = (unsigned char)kind;
+        out[written++] = (unsigned char)((value_length >> 8) & 0xff);
+        out[written++] = (unsigned char)(value_length & 0xff);
+        memcpy(out + written, value, (size_t)value_length);
+        written += value_length;
+    }
+
+    GENERAL_NAMES_free(names);
+    ERR_clear_error();
+    return written;
 }
 
 int mts_ssl_shutdown(void *s) {

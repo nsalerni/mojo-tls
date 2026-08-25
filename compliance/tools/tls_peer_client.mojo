@@ -34,6 +34,14 @@ def print_peer_certificate(
         == expected_der_hex else "MISMATCH",
         sep="",
     )
+    for value in certificate.subject_alt_names.dns_names:
+        print("SAN DNS ", value, sep="")
+    for value in certificate.subject_alt_names.uri_names:
+        print("SAN URI ", value, sep="")
+    for value in certificate.subject_alt_names.email_addresses:
+        print("SAN EMAIL ", value, sep="")
+    for value in certificate.subject_alt_names.ip_addresses:
+        print("SAN IP ", value, sep="")
 
 
 def main() raises:

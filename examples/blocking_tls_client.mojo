@@ -46,8 +46,8 @@ def main() raises:
     var peer = stream.peer_certificate()
     if not peer:
         raise Error("TLS server did not provide a certificate")
-    # Copy the snapshot before closing the stream. The snapshot owns its DER
-    # bytes, so applications can keep it after the TLS connection closes.
+    # Copy the snapshot before closing the stream. It owns the DER bytes and
+    # typed names, so applications can keep it after the connection closes.
     var certificate = peer.value().copy()
     if not certificate.verified or certificate.matched_name != "localhost":
         raise Error("TLS server identity was not verified for localhost")
@@ -61,4 +61,10 @@ def main() raises:
 
     if len(certificate.leaf_der) == 0:
         raise Error("owned certificate snapshot is empty")
+    if (
+        len(certificate.subject_alt_names.uri_names) != 1
+        or certificate.subject_alt_names.uri_names[0]
+        != "spiffe://example.test/server"
+    ):
+        raise Error("owned certificate URI is missing")
     print("verified localhost over ", version, " with ", ALPN, sep="")

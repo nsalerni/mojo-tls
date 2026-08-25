@@ -14,7 +14,7 @@ from net import (
     is_timeout_error,
     is_would_block,
 )
-from tls import TLSContext
+from tls import PeerCertificate, TLSContext
 
 
 comptime CA = "build/certs/ca.pem"
@@ -27,6 +27,22 @@ comptime SELFSIGNED_KEY = "build/certs/selfsigned.key"
 comptime CLIENT_CERT = "build/certs/client-chain.pem"
 comptime CLIENT_KEY = "build/certs/client.key"
 comptime CLIENT_ENCRYPTED_KEY = "build/certs/client-encrypted.key"
+comptime MALFORMED_NUL_CERT = "build/certs/malformed_nul.pem"
+comptime MALFORMED_NUL_KEY = "build/certs/malformed_nul.key"
+comptime MALFORMED_LF_CERT = "build/certs/malformed_lf.pem"
+comptime MALFORMED_LF_KEY = "build/certs/malformed_lf.key"
+comptime MALFORMED_HIGH_CERT = "build/certs/malformed_high.pem"
+comptime MALFORMED_HIGH_KEY = "build/certs/malformed_high.key"
+comptime MALFORMED_IP_CERT = "build/certs/malformed_ip.pem"
+comptime MALFORMED_IP_KEY = "build/certs/malformed_ip.key"
+comptime OVERSIZED_SAN_VALUE_CERT = "build/certs/oversized_san_value.pem"
+comptime OVERSIZED_SAN_VALUE_KEY = "build/certs/oversized_san_value.key"
+comptime EMPTY_SAN_CERT = "build/certs/empty_san.pem"
+comptime EMPTY_SAN_KEY = "build/certs/empty_san.key"
+comptime TOO_MANY_SANS_CERT = "build/certs/too_many_sans.pem"
+comptime TOO_MANY_SANS_KEY = "build/certs/too_many_sans.key"
+comptime TOO_MANY_SAN_BYTES_CERT = "build/certs/too_many_san_bytes.pem"
+comptime TOO_MANY_SAN_BYTES_KEY = "build/certs/too_many_san_bytes.key"
 
 
 def fork_tls_echo_server(
@@ -92,6 +108,24 @@ def test_handshake_echo_alpn() raises:
     assert_true(len(certificate.leaf_der) > 0)
     assert_true(certificate.verified)
     assert_equal(certificate.matched_name, "localhost")
+    assert_equal(len(certificate.subject_alt_names.dns_names), 2)
+    assert_equal(certificate.subject_alt_names.dns_names[0], "localhost")
+    assert_equal(
+        certificate.subject_alt_names.dns_names[1], "service.example.test"
+    )
+    assert_equal(len(certificate.subject_alt_names.uri_names), 1)
+    assert_equal(
+        certificate.subject_alt_names.uri_names[0],
+        "spiffe://example.test/server",
+    )
+    assert_equal(len(certificate.subject_alt_names.email_addresses), 1)
+    assert_equal(
+        certificate.subject_alt_names.email_addresses[0],
+        "server@example.test",
+    )
+    assert_equal(len(certificate.subject_alt_names.ip_addresses), 2)
+    assert_equal(certificate.subject_alt_names.ip_addresses[0], "127.0.0.1")
+    assert_equal(certificate.subject_alt_names.ip_addresses[1], "2001:db8::1")
 
     stream.write_all("sixteen tls byte".as_bytes())
     assert_equal(String(from_utf8=stream.read_exact(16)), "sixteen tls byte")
@@ -108,6 +142,11 @@ def test_handshake_echo_alpn() raises:
     assert_true(
         len(certificate.leaf_der) > 0,
         "certificate snapshot remains owned after stream close",
+    )
+    assert_equal(
+        certificate.subject_alt_names.uri_names[0],
+        "spiffe://example.test/server",
+        "certificate names remain owned after stream close",
     )
     var closed_raised = False
     try:
@@ -211,6 +250,79 @@ def test_verify_disabled_accepts_selfsigned() raises:
     assert_equal(String(from_utf8=stream.read_exact(2)), "ok")
     stream.close()
     reap(server[1])
+
+
+def assert_peer_names_rejected(
+    cert: StringSpan, key: StringSpan, expected_error: StringSpan
+) raises:
+    var server = fork_tls_echo_server(cert, key, List[String]())
+    var ctx = TLSContext.client(verify=False)
+    var tcp = TCPStream.connect("127.0.0.1", server[0])
+    var stream = ctx.connect(tcp^, "localhost")
+    var raised = False
+    try:
+        _ = stream.peer_certificate()
+    except error:
+        raised = True
+        assert_true(String(expected_error) in String(error), String(error))
+    stream.close()
+    reap(server[1])
+    assert_true(raised, "unsafe certificate names must be rejected")
+
+
+def test_reject_unsafe_subject_alt_names() raises:
+    assert_peer_names_rejected(
+        MALFORMED_NUL_CERT,
+        MALFORMED_NUL_KEY,
+        "malformed peer certificate name",
+    )
+    assert_peer_names_rejected(
+        MALFORMED_LF_CERT,
+        MALFORMED_LF_KEY,
+        "malformed peer certificate name",
+    )
+    assert_peer_names_rejected(
+        MALFORMED_HIGH_CERT,
+        MALFORMED_HIGH_KEY,
+        "malformed peer certificate name",
+    )
+    assert_peer_names_rejected(
+        MALFORMED_IP_CERT,
+        MALFORMED_IP_KEY,
+        "malformed peer certificate name",
+    )
+    assert_peer_names_rejected(
+        EMPTY_SAN_CERT,
+        EMPTY_SAN_KEY,
+        "malformed peer certificate name",
+    )
+    assert_peer_names_rejected(
+        OVERSIZED_SAN_VALUE_CERT,
+        OVERSIZED_SAN_VALUE_KEY,
+        "malformed peer certificate name",
+    )
+    assert_peer_names_rejected(
+        TOO_MANY_SANS_CERT,
+        TOO_MANY_SANS_KEY,
+        "more than 256 names",
+    )
+    assert_peer_names_rejected(
+        TOO_MANY_SAN_BYTES_CERT,
+        TOO_MANY_SAN_BYTES_KEY,
+        "names exceed 64 KiB",
+    )
+
+
+def test_peer_certificate_compatibility_constructor() raises:
+    var der = List[Byte](length=2, fill=0xA5)
+    var certificate = PeerCertificate(der^, True, String("legacy.example"))
+    assert_equal(len(certificate.leaf_der), 2)
+    assert_true(certificate.verified)
+    assert_equal(certificate.matched_name, "legacy.example")
+    assert_equal(len(certificate.subject_alt_names.dns_names), 0)
+    assert_equal(len(certificate.subject_alt_names.uri_names), 0)
+    assert_equal(len(certificate.subject_alt_names.email_addresses), 0)
+    assert_equal(len(certificate.subject_alt_names.ip_addresses), 0)
 
 
 def test_alpn_no_overlap_fails() raises:
@@ -486,6 +598,8 @@ def main() raises:
     test_reject_untrusted_ca()
     test_reject_wrong_hostname()
     test_verify_disabled_accepts_selfsigned()
+    test_reject_unsafe_subject_alt_names()
+    test_peer_certificate_compatibility_constructor()
     test_alpn_no_overlap_fails()
     test_read_timeout_through_tls()
     test_nonblocking_handshake_and_partial_io()

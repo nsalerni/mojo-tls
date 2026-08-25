@@ -4,13 +4,7 @@ Same rule as the rest of the family: nothing lands without a differential
 check against a reference implementation. Here the reference is CPython's
 `ssl` module on the other end of a live connection.
 
-## 1. Structured certificate names
-
-Expose subject alternative names as typed DNS, URI, email, and IP values.
-The current API returns the complete leaf certificate as DER and the hostname
-matched by client verification, without guessing at authorization policy.
-
-## 2. Session resumption
+## 1. Session resumption
 
 TLS 1.3 session tickets, so reconnecting clients skip a round trip.
 Verified by CPython session-reuse checks (`session_reused` on the
@@ -20,9 +14,11 @@ reference side) and handshake-count assertions.
 
 `TLSStream.peer_certificate()` copies the peer leaf certificate out of libssl.
 The snapshot records whether this connection verified the certificate and the
-certificate name matched by client hostname verification. CPython peers check
-the exact DER bytes in both roles under TLS 1.2 and TLS 1.3. A missing client
-certificate and verification-disabled connections have explicit results.
+certificate name matched by client hostname verification. It also owns typed
+DNS, URI, email, and IP subject alternative names. CPython checks the exact DER
+bytes and supported names in both roles under TLS 1.2 and TLS 1.3. A missing
+client certificate and verification-disabled connections have explicit
+results.
 
 `TLSContext.server` can require a client certificate signed by a configured
 CA. CPython clients verify acceptance of a trusted chain and rejection of
