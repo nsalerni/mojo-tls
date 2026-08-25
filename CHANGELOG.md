@@ -4,6 +4,10 @@
 
 ## 0.3.0 - 2026-08-25
 
+- Added a local blocking client example with CA, hostname, ALPN, certificate,
+  request, and response checks.
+- Added differential checks for clean `close_notify` EOF and truncated TLS
+  transports against CPython clients and servers.
 - Added owned DNS, URI, email, and IP subject alternative names to peer
   certificate snapshots.
 - Added bounded parsing that rejects ASCII control bytes, DEL, invalid IP
