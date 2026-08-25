@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Added owned DNS, URI, email, and IP subject alternative names to peer
+  certificate snapshots.
+- Added bounded parsing that rejects ASCII control bytes, DEL, invalid IP
+  lengths, empty extensions, oversized values, and certificates with more
+  than 256 names.
+- Added CPython comparisons for server and client certificate names under TLS
+  1.2 and TLS 1.3.
+
 ## 0.2.4 - 2026-08-24
 
 - Added owned peer leaf certificate snapshots to `TLSStream`, including the

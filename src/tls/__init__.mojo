@@ -31,4 +31,10 @@ def main() raises:
 ```
 """
 
-from .tls import PeerCertificate, TLSContext, TLSHandshake, TLSStream
+from .tls import (
+    PeerCertificate,
+    SubjectAlternativeNames,
+    TLSContext,
+    TLSHandshake,
+    TLSStream,
+)

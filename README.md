@@ -86,6 +86,8 @@ if not peer or not peer.value().verified:
     raise Error("verified peer certificate required")
 var identity = peer.value().copy()
 # Compare identity.leaf_der with an allowed certificate.
+for uri in identity.subject_alt_names.uri_names:
+    print(uri)
 ```
 
 `leaf_der` contains the exact leaf certificate bytes and remains valid after
@@ -97,6 +99,18 @@ On a verifying client, `matched_name` is the certificate name that OpenSSL
 matched during hostname verification. It is empty for server-side client
 certificates and connections that did not perform a hostname check. The
 package does not log certificate bytes or identity fields.
+
+`subject_alt_names` has separate owned lists for DNS names, URIs, RFC 822
+email addresses, and canonical IP address text. The lists remain valid after
+the stream closes. The certificate controls their contents, so applications
+must apply their own authorization policy after requiring `verified`.
+
+The shim accepts at most 256 subject alternative name entries, 4096 bytes per
+supported value, and 64 KiB for the copied record set. DNS, URI, and email
+values must contain printable ASCII. The shim rejects control bytes, DEL,
+non-ASCII text, invalid IP address lengths, empty or duplicate subjectAltName
+extensions, and truncated copies. It omits unsupported GeneralName choices,
+including otherName, directoryName, and registeredID.
 
 ## How it works
 
@@ -138,8 +152,8 @@ other end of the connection, in both roles:
   and TLS 1.3, with trusted chains and rejection of missing certificates,
   untrusted chains, server-only certificates, mismatched keys, and encrypted
   keys
-- owned peer leaf certificates, verification status, and matched hostnames in
-  both roles under TLS 1.2 and TLS 1.3
+- owned peer leaf certificates, verification status, matched hostnames, and
+  typed subject alternative names in both roles under TLS 1.2 and TLS 1.3
 - non-blocking handshake progress, an 8 MiB partial-I/O exchange, and a bounded
   WANT_WRITE backpressure probe against CPython TLS peers
 - clean `close_notify` EOF and truncated transport shutdowns, with CPython
@@ -156,8 +170,8 @@ pixi run compliance           # differential vs CPython ssl; rewrites COMPLIANCE
 ## Status
 
 Built for [grpc-mojo](https://github.com/nsalerni/grpc-mojo), which uses it
-for secure HTTP/2 and gRPC transports. Structured certificate name access and
-session resumption remain; see [ROADMAP.md](ROADMAP.md).
+for secure HTTP/2 and gRPC transports. Session resumption remains; see
+[ROADMAP.md](ROADMAP.md).
 
 ## License
 

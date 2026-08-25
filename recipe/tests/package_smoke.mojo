@@ -3,7 +3,7 @@ from std.sys import argv
 from std.testing import assert_equal, assert_true
 
 from net import TCPListener, TCPStream
-from tls import PeerCertificate, TLSContext
+from tls import PeerCertificate, SubjectAlternativeNames, TLSContext
 
 
 def run_server(
@@ -31,6 +31,18 @@ def run_server(
                 raise Error("installed server did not verify client identity")
             if identity.matched_name != "":
                 raise Error("server client identity had a matched hostname")
+            var client_names: SubjectAlternativeNames = (
+                identity.subject_alt_names.copy()
+            )
+            if (
+                len(client_names.dns_names) != 1
+                or client_names.dns_names[0] != "client.example.test"
+                or client_names.uri_names[0]
+                != "spiffe://example.test/package-client"
+                or client_names.email_addresses[0] != "client@example.test"
+                or client_names.ip_addresses[0] != "192.0.2.45"
+            ):
+                raise Error("installed server copied wrong client names")
             var request = stream.read_exact(4)
             stream.write_all(Span(request))
             stream.close()
@@ -48,6 +60,13 @@ def main() raises:
         6,
         "expected CA, server identity, and client identity paths",
     )
+
+    var compatibility_der = List[Byte](length=1, fill=0x30)
+    var compatibility = PeerCertificate(
+        compatibility_der^, False, String("legacy.example")
+    )
+    assert_equal(compatibility.matched_name, "legacy.example")
+    assert_equal(len(compatibility.subject_alt_names.dns_names), 0)
 
     var server = run_server(
         String(args[2]), String(args[3]), String(args[1])
@@ -67,6 +86,16 @@ def main() raises:
     assert_true(identity.verified)
     assert_true(len(identity.leaf_der) > 0)
     assert_equal(identity.matched_name, "localhost")
+    assert_equal(identity.subject_alt_names.dns_names[0], "localhost")
+    assert_equal(
+        identity.subject_alt_names.uri_names[0],
+        "spiffe://example.test/package-server",
+    )
+    assert_equal(
+        identity.subject_alt_names.email_addresses[0],
+        "server@example.test",
+    )
+    assert_equal(identity.subject_alt_names.ip_addresses[0], "127.0.0.1")
 
     assert_true(stream.version().startswith("TLSv1."), stream.version())
     assert_equal(stream.negotiated_alpn(), "h2")
@@ -74,6 +103,10 @@ def main() raises:
     assert_equal(String(from_utf8=stream.read_exact(4)), "ping")
     stream.close()
     assert_true(len(identity.leaf_der) > 0)
+    assert_equal(
+        identity.subject_alt_names.uri_names[0],
+        "spiffe://example.test/package-server",
+    )
 
     var status = c_int(0)
     var waited = external_call["waitpid", c_int](

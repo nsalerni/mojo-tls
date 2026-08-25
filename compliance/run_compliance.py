@@ -13,6 +13,7 @@ With --json PATH, also dumps {"sections": {...}} for the umbrella suite.
 """
 
 import argparse
+import ipaddress
 import json
 import os
 import platform
@@ -38,10 +39,10 @@ COMPLIANCE_BADGE = ROOT / "compliance-badge.json"
 
 EXPECTED_TLS_CHECKS = (
     "mojo client vs CPython server: TLSv1.3, ALPN h2, 256KB echo",
-    "Mojo client copies the verified CPython server leaf under TLS 1.3",
-    "Mojo client copies the verified CPython server leaf under TLS 1.2",
-    "Mojo server copies the verified CPython client leaf under TLS 1.3",
-    "Mojo server copies the verified CPython client leaf under TLS 1.2",
+    "Mojo client copies the verified CPython server leaf and typed SANs under TLS 1.3",
+    "Mojo client copies the verified CPython server leaf and typed SANs under TLS 1.2",
+    "Mojo server copies the verified CPython client leaf and typed SANs under TLS 1.3",
+    "Mojo server copies the verified CPython client leaf and typed SANs under TLS 1.2",
     "Mojo server reports no peer certificate when CPython sends none",
     "Mojo does not mark a CPython certificate verified when verification is disabled",
     "nonblocking Mojo client presents a trusted certificate chain to CPython",
@@ -289,13 +290,53 @@ def parse_peer_line(output: str) -> dict[str, object]:
         return {"error": "invalid peer DER length"}
     if der_length <= 0 or parts[4] not in ("MATCH", "MISMATCH"):
         return {"error": "invalid peer DER result"}
+    subject_alt_names: dict[str, list[str]] = {
+        "dns": [],
+        "uri": [],
+        "email": [],
+        "ip": [],
+    }
+    for line in output.splitlines():
+        if not line.startswith("SAN "):
+            continue
+        san_parts = line.split(maxsplit=2)
+        if len(san_parts) != 3:
+            return {"error": "malformed SAN line"}
+        kind = san_parts[1].lower()
+        if kind not in subject_alt_names or not san_parts[2]:
+            return {"error": "invalid SAN line"}
+        subject_alt_names[kind].append(san_parts[2])
     return {
         "present": True,
         "verified": parts[1] == "VERIFIED",
         "matched_name": "" if parts[2] == "-" else parts[2],
         "der_length": der_length,
         "der_matches": parts[4] == "MATCH",
+        "subject_alt_names": subject_alt_names,
     }
+
+
+def cpython_certificate_sans(path: Path) -> dict[str, list[str]]:
+    """Returns supported names using CPython's certificate decoder."""
+    decoded = ssl._ssl._test_decode_cert(str(path))
+    names: dict[str, list[str]] = {
+        "dns": [],
+        "uri": [],
+        "email": [],
+        "ip": [],
+    }
+    kinds = {
+        "DNS": "dns",
+        "URI": "uri",
+        "email": "email",
+        "IP Address": "ip",
+    }
+    for kind, value in decoded.get("subjectAltName", ()):
+        if kind in kinds:
+            if kind == "IP Address":
+                value = str(ipaddress.ip_address(value))
+            names[kinds[kind]].append(value)
+    return names
 
 
 def peer_detail(result: dict) -> str:
@@ -309,6 +350,7 @@ def peer_detail(result: dict) -> str:
         f"name={peer.get('matched_name')!r} "
         f"der_len={peer.get('der_length')!r} "
         f"der_match={peer.get('der_matches')!r} "
+        f"sans={peer.get('subject_alt_names')!r} "
         f"peer_error={peer.get('error')!r} error={result.get('error')!r}"
     )
 
@@ -898,6 +940,8 @@ def section_tls():
     expected_client_der = ssl.PEM_cert_to_DER_cert(
         (CERTS / "client.pem").read_text()
     )
+    expected_server_sans = cpython_certificate_sans(CERTS / "server.pem")
+    expected_client_sans = cpython_certificate_sans(CERTS / "client.pem")
 
     for tls_version, label in (
         (ssl.TLSVersion.TLSv1_3, "TLS 1.3"),
@@ -909,7 +953,7 @@ def section_tls():
         peer = identity["peer"]
         record(
             "tls",
-            f"Mojo client copies the verified CPython server leaf under {label}",
+            f"Mojo client copies the verified CPython server leaf and typed SANs under {label}",
             identity.get("rc") == 0
             and identity.get("version") == label.replace(" ", "v")
             and identity.get("alpn") == "h2"
@@ -920,6 +964,7 @@ def section_tls():
             and peer.get("matched_name") == "localhost"
             and peer.get("der_length") == len(expected_server_der)
             and peer.get("der_matches") is True
+            and peer.get("subject_alt_names") == expected_server_sans
             and identity.get("thread_alive") is False,
             peer_detail(identity),
         )
@@ -937,7 +982,7 @@ def section_tls():
         peer = identity["peer"]
         record(
             "tls",
-            f"Mojo server copies the verified CPython client leaf under {label}",
+            f"Mojo server copies the verified CPython client leaf and typed SANs under {label}",
             identity.get("rc") == 0
             and identity.get("version") == label.replace(" ", "v")
             and identity.get("alpn") == "h2"
@@ -947,7 +992,8 @@ def section_tls():
             and peer.get("verified") is True
             and peer.get("matched_name") == ""
             and peer.get("der_length") == len(expected_client_der)
-            and peer.get("der_matches") is True,
+            and peer.get("der_matches") is True
+            and peer.get("subject_alt_names") == expected_client_sans,
             peer_detail(identity),
         )
 
@@ -1733,15 +1779,11 @@ HTML_THESIS = (
     " same reasons the reference rejects them."
 )
 HTML_GAPS = [
-    (
-        "Structured certificate names",
-        "Applications can inspect the exact verified leaf certificate, but typed subject alternative names are not exposed yet.",
-    ),
     ("Session resumption", "Every connection is a full handshake for now."),
 ]
 HTML_SECTIONS = {
     "tls": ("`tls` vs CPython `ssl`",
-            "Live connections with CPython's ssl module as the peer in both roles: TLS 1.3 and 1.2 negotiation, ALPN agreement and fatal-alert on no overlap, chain and hostname verification, exact peer leaf certificate copies, client certificate authentication in both roles, bulk and readiness-driven transfer through the record layer, and a bad-certificate corpus that both implementations must reject."),
+            "Live connections with CPython's ssl module as the peer in both roles: TLS 1.3 and 1.2 negotiation, ALPN agreement and fatal-alert on no overlap, chain and hostname verification, exact peer leaf certificate and typed subject alternative name copies, client certificate authentication in both roles, bulk and readiness-driven transfer through the record layer, and a bad-certificate corpus that both implementations must reject."),
 }
 
 

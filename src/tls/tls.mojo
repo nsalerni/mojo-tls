@@ -42,6 +42,9 @@ comptime _WANT_WRITE = -3
 comptime _SYSCALL_ERROR = -5
 comptime _MAX_PEER_CERT_DER = 1024 * 1024
 comptime _MAX_PEER_NAME = 4096
+comptime _MAX_PEER_SAN_COUNT = 256
+comptime _MAX_PEER_SAN_BYTES = 64 * 1024
+comptime _MAX_PEER_SAN_VALUE = 4096
 
 
 def _shim_filename() -> String:
@@ -108,12 +111,31 @@ def _alpn_wire(protocols: List[String]) raises -> List[Byte]:
 
 
 @fieldwise_init
+struct SubjectAlternativeNames(Copyable, Movable):
+    """Owned subject alternative names from a peer leaf certificate.
+
+    OpenSSL preserves certificate order within each list. Unsupported
+    GeneralName choices, such as otherName and directoryName, are omitted.
+    """
+
+    var dns_names: List[String]
+    """DNS names."""
+    var uri_names: List[String]
+    """Uniform resource identifiers."""
+    var email_addresses: List[String]
+    """RFC 822 email addresses."""
+    var ip_addresses: List[String]
+    """IPv4 and IPv6 addresses in canonical text form."""
+
+
+@fieldwise_init
 struct PeerCertificate(Copyable, Movable):
     """An owned snapshot of the peer's leaf certificate.
 
-    The bytes and matched name are copied out of libssl. They remain valid
-    after the TLS stream closes. Certificate presence alone does not establish
-    trust, so authorization code must check `verified`.
+    The DER bytes, matched name, and subject alternative names are copied out
+    of libssl. They remain valid after the TLS stream closes. Certificate
+    presence alone does not establish trust, so authorization code must check
+    `verified`.
     """
 
     var leaf_der: List[Byte]
@@ -122,6 +144,34 @@ struct PeerCertificate(Copyable, Movable):
     """Whether this session required peer verification and it succeeded."""
     var matched_name: String
     """The certificate name matched by hostname verification, if any."""
+    var subject_alt_names: SubjectAlternativeNames
+    """Typed names copied from the subjectAltName extension."""
+
+    def __init__(
+        out self,
+        var leaf_der: List[Byte],
+        verified: Bool,
+        var matched_name: String,
+    ):
+        """Builds a snapshot without parsed subject alternative names.
+
+        This initializer preserves the original three-argument API. New
+        snapshots returned by `TLSStream` populate `subject_alt_names`.
+
+        Args:
+            leaf_der: Peer leaf certificate in DER form.
+            verified: Whether required peer verification succeeded.
+            matched_name: Name matched by hostname verification, if any.
+        """
+        self.leaf_der = leaf_der^
+        self.verified = verified
+        self.matched_name = matched_name^
+        self.subject_alt_names = SubjectAlternativeNames(
+            dns_names=List[String](),
+            uri_names=List[String](),
+            email_addresses=List[String](),
+            ip_addresses=List[String](),
+        )
 
 
 @fieldwise_init
@@ -731,8 +781,9 @@ struct TLSStream(ReadinessStream):
             authentication normally receives None.
 
         Raises:
-            If the stream is closed, the certificate is too large, or libssl
-            cannot encode or copy the certificate.
+            If the stream is closed, the certificate or its supported names
+            exceed a bound, a supported name is malformed, or libssl cannot
+            encode or copy the certificate.
         """
         if not self._open:
             raise Error("tls: peer certificate requested after close")
@@ -777,10 +828,76 @@ struct TLSStream(ReadinessStream):
         if name_length < 0 or name_length > _MAX_PEER_NAME:
             raise Error("tls: copying matched peer name")
         name_bytes.shrink(name_length)
+
+        var san_bytes = List[Byte](length=_MAX_PEER_SAN_BYTES, fill=0)
+        var san_length = Int(
+            self._lib.get_function[c_int](
+                "mts_ssl_peer_subject_alt_names"
+            )(
+                self._ssl,
+                san_bytes.unsafe_ptr(),
+                c_int(_MAX_PEER_SAN_BYTES),
+            )
+        )
+        if san_length == -2:
+            raise Error("tls: peer certificate has more than 256 names")
+        if san_length == -3:
+            raise Error("tls: peer certificate names exceed 64 KiB")
+        if san_length == -4:
+            raise Error("tls: malformed peer certificate name")
+        if san_length < 0 or san_length > _MAX_PEER_SAN_BYTES:
+            raise Error("tls: copying peer certificate names")
+        san_bytes.shrink(san_length)
+
+        var dns_names = List[String]()
+        var uri_names = List[String]()
+        var email_addresses = List[String]()
+        var ip_addresses = List[String]()
+        var offset = 0
+        var san_count = 0
+        while offset < san_length:
+            if san_length - offset < 3:
+                raise Error("tls: malformed peer certificate name copy")
+            var kind = Int(san_bytes[offset])
+            var value_length = (
+                Int(san_bytes[offset + 1]) << 8
+                | Int(san_bytes[offset + 2])
+            )
+            offset += 3
+            if (
+                value_length <= 0
+                or value_length > _MAX_PEER_SAN_VALUE
+                or value_length > san_length - offset
+            ):
+                raise Error("tls: malformed peer certificate name copy")
+            san_count += 1
+            if san_count > _MAX_PEER_SAN_COUNT:
+                raise Error("tls: malformed peer certificate name count")
+            var value = String(
+                from_utf8=Span(san_bytes)[offset : offset + value_length]
+            )
+            offset += value_length
+            if kind == 1:
+                dns_names.append(value^)
+            elif kind == 2:
+                uri_names.append(value^)
+            elif kind == 3:
+                email_addresses.append(value^)
+            elif kind == 4:
+                ip_addresses.append(value^)
+            else:
+                raise Error("tls: malformed peer certificate name kind")
+
         return PeerCertificate(
             leaf_der=der^,
             verified=verified_value == 1,
             matched_name=String(from_utf8=name_bytes),
+            subject_alt_names=SubjectAlternativeNames(
+                dns_names=dns_names^,
+                uri_names=uri_names^,
+                email_addresses=email_addresses^,
+                ip_addresses=ip_addresses^,
+            ),
         )
 
     def close(mut self):

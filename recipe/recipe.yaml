@@ -111,7 +111,8 @@ tests:
             -subj '/CN=localhost' \
             -keyout "${WORK}/server.key" -out "${WORK}/server.csr" \
             >/dev/null 2>&1
-          printf '%s\n' 'subjectAltName=DNS:localhost,IP:127.0.0.1' \
+          printf '%s\n' \
+            'subjectAltName=DNS:localhost,IP:127.0.0.1,URI:spiffe://example.test/package-server,email:server@example.test' \
             'keyUsage=critical,digitalSignature,keyEncipherment' \
             'extendedKeyUsage=serverAuth' 'basicConstraints=CA:FALSE' \
             > "${WORK}/server.ext"
@@ -124,6 +125,7 @@ tests:
             -keyout "${WORK}/client.key" -out "${WORK}/client.csr" \
             >/dev/null 2>&1
           printf '%s\n' \
+            'subjectAltName=DNS:client.example.test,IP:192.0.2.45,URI:spiffe://example.test/package-client,email:client@example.test' \
             'keyUsage=critical,digitalSignature,keyEncipherment' \
             'extendedKeyUsage=clientAuth' 'basicConstraints=CA:FALSE' \
             > "${WORK}/client.ext"
