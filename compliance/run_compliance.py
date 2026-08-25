@@ -27,6 +27,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import cast
 
 ROOT = Path(__file__).resolve().parent.parent  # package root
 BUILD = ROOT / "build"
@@ -64,6 +65,8 @@ EXPECTED_TLS_CHECKS = (
     "partial Mojo TLS writes match CPython",
     "partial Mojo TLS reads preserve WANT_READ against CPython",
     "Mojo TLS write preserves WANT_WRITE under CPython backpressure",
+    "clean close_notify returns EOF in Mojo and CPython",
+    "truncated TLS transport is rejected by Mojo and CPython",
     "fatal session teardown does not contaminate the next nonblocking TLS session",
     "reset peers with rejected ALPN do not terminate the server",
 )
@@ -408,6 +411,116 @@ def py_receive_then_echo(ctx, size: int, results: dict):
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
     return thread
+
+
+def py_shutdown_server(ctx, clean: bool, results: dict):
+    """Sends one payload, then closes with or without close_notify."""
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    results["port"] = listener.getsockname()[1]
+    results["ready"].set()
+
+    def serve():
+        tls = None
+        raw = None
+        try:
+            connection, _ = listener.accept()
+            connection.settimeout(30)
+            tls = ctx.wrap_socket(connection, server_side=True)
+            tls.sendall(b"done")
+            if clean:
+                raw = tls.unwrap()
+                tls = None
+            else:
+                raw = socket.socket(fileno=tls.detach())
+                tls = None
+        except Exception as error:
+            results["error"] = repr(error)
+        finally:
+            if tls is not None:
+                tls.close()
+            if raw is not None:
+                raw.close()
+            listener.close()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    return thread
+
+
+def python_shutdown_outcome(port: int) -> str:
+    """Classifies a CPython TLS read with ragged EOF suppression disabled."""
+    context = ssl.create_default_context(cafile=str(CERTS / "ca.pem"))
+    raw = socket.create_connection(("127.0.0.1", port), timeout=10)
+    tls = context.wrap_socket(
+        raw,
+        server_hostname="localhost",
+        suppress_ragged_eofs=False,
+    )
+    try:
+        payload = bytearray()
+        while len(payload) < 4:
+            chunk = tls.recv(4 - len(payload))
+            if not chunk:
+                break
+            payload.extend(chunk)
+        if bytes(payload) != b"done":
+            return "DATA"
+        try:
+            trailing = tls.recv(1)
+        except ssl.SSLEOFError:
+            return "ERROR"
+        if trailing:
+            return "DATA"
+        unwrapped = tls.unwrap()
+        tls = None
+        unwrapped.close()
+        return "EOF"
+    finally:
+        if tls is not None:
+            tls.close()
+
+
+def compare_shutdown_outcomes(clean: bool) -> tuple[bool, str]:
+    """Runs the same CPython shutdown peer against CPython and Mojo clients."""
+    reference = {"ready": threading.Event()}
+    reference_thread = py_shutdown_server(
+        py_server_ctx("server.pem", "server.key"), clean, reference
+    )
+    reference["ready"].wait(10)
+    reference_outcome = python_shutdown_outcome(cast(int, reference["port"]))
+    reference_thread.join(timeout=30)
+
+    candidate = {"ready": threading.Event()}
+    candidate_thread = py_shutdown_server(
+        py_server_ctx("server.pem", "server.key"), clean, candidate
+    )
+    candidate["ready"].wait(10)
+    run = run_tool(
+        "tls_shutdown_client",
+        candidate["port"],
+        str(CERTS / "ca.pem"),
+        timeout=60,
+    )
+    candidate_thread.join(timeout=30)
+    first_line = run.stdout.splitlines()[0] if run.stdout.splitlines() else ""
+    mojo_outcome = first_line.split(maxsplit=1)[0]
+    expected = "EOF" if clean else "ERROR"
+    ok = (
+        reference_outcome == expected
+        and mojo_outcome == expected
+        and run.returncode == 0
+        and not reference_thread.is_alive()
+        and not candidate_thread.is_alive()
+    )
+    detail = (
+        f"expected={expected} python={reference_outcome} mojo={mojo_outcome} "
+        f"python_peer={reference} mojo_peer={candidate} "
+        f"rc={run.returncode} out={run.stdout.strip()!r} "
+        f"err={run.stderr[:150]!r}"
+    )
+    return ok, detail
 
 
 def mojo_client_peer_snapshot(
@@ -1383,6 +1496,21 @@ def section_tls():
         "Mojo TLS write preserves WANT_WRITE under CPython backpressure",
         pressure_ok,
         f"out={r.stdout.strip()!r} peer={pressure} err={r.stderr[:150]!r}",
+    )
+
+    clean_ok, clean_detail = compare_shutdown_outcomes(clean=True)
+    record(
+        "tls",
+        "clean close_notify returns EOF in Mojo and CPython",
+        clean_ok,
+        clean_detail,
+    )
+    truncated_ok, truncated_detail = compare_shutdown_outcomes(clean=False)
+    record(
+        "tls",
+        "truncated TLS transport is rejected by Mojo and CPython",
+        truncated_ok,
+        truncated_detail,
     )
 
     # A fatal record on one libssl session must not change the readiness
