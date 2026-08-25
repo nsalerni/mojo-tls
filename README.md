@@ -142,6 +142,8 @@ other end of the connection, in both roles:
   both roles under TLS 1.2 and TLS 1.3
 - non-blocking handshake progress, an 8 MiB partial-I/O exchange, and a bounded
   WANT_WRITE backpressure probe against CPython TLS peers
+- clean `close_notify` EOF and truncated transport shutdowns, with CPython
+  clients and servers judging the same two outcomes
 
 Current results: [COMPLIANCE.md](COMPLIANCE.md).
 
