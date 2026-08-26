@@ -17,6 +17,7 @@ import ipaddress
 import json
 import os
 import platform
+import re
 import select
 import signal
 import socket
@@ -693,6 +694,30 @@ def python_client_peer_snapshot(
     return result
 
 
+_TLS_SYSCALL_ERRNO = re.compile(r"tls (?:read|write|handshake): errno (\d+)")
+# EPIPE, ECONNRESET (macOS), ECONNRESET (Linux).
+_TLS_RESET_ERRNOS = {32, 54, 104}
+
+
+def _mojo_tls_reset_or_failure(client_output: str) -> bool:
+    """True when the Mojo client failed after a peer abort or TLS error."""
+    if "net: timeout" in client_output:
+        return True
+    if any(
+        marker in client_output
+        for marker in (
+            "tls read failed",
+            "tls write failed",
+            "tls handshake failed",
+        )
+    ):
+        return True
+    for match in _TLS_SYSCALL_ERRNO.finditer(client_output):
+        if int(match.group(1)) in _TLS_RESET_ERRNOS:
+            return True
+    return False
+
+
 def mojo_client_rejected_by_required_python_server(
     *,
     expected_reason: str | None = None,
@@ -727,20 +752,7 @@ def mojo_client_rejected_by_required_python_server(
     client_output = result.stdout + result.stderr
     mojo_tls_failure = (
         result.returncode != 0
-        and (
-            any(
-                marker in client_output
-                for marker in (
-                    "tls read failed",
-                    "tls write failed",
-                    "tls handshake failed",
-                    "tls read: errno",
-                    "tls write: errno",
-                    "tls handshake: errno",
-                )
-            )
-            or "net: timeout" in client_output
-        )
+        and _mojo_tls_reset_or_failure(client_output)
         and "VERSION TLSv1.3" in result.stdout
         and "ALPN h2" in result.stdout
     )
