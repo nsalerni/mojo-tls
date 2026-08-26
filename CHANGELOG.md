@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Documented the blocking vs readiness-driven handshake contract.
 - Client `connect()` fails closed when the peer rejects the client
   certificate with a post-handshake alert, instead of returning a live
   stream that dies on the first write.
