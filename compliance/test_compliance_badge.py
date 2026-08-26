@@ -2,6 +2,7 @@
 """Regression checks for the generated compliance badge."""
 
 import json
+import errno
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,6 +12,8 @@ import run_compliance
 
 from run_compliance import (
     EXPECTED_TLS_CHECKS,
+    _mojo_client_failed_required_mtls,
+    _mojo_tls_reset_or_failure,
     compliance_badge_json,
     compliance_badge_payload,
     write_html_report,
@@ -105,6 +108,44 @@ class ComplianceBadgeTest(unittest.TestCase):
         payload = compliance_badge_payload(results)
 
         self.assertEqual(payload["color"], "red")
+
+
+class CompletedProcess:
+    def __init__(self, returncode, stdout, stderr):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+class RequiredMtlsMatcherTest(unittest.TestCase):
+    def test_reset_errnos_are_peer_aborts(self):
+        self.assertTrue(
+            _mojo_tls_reset_or_failure("tls write: errno " + str(errno.EPIPE))
+        )
+        self.assertTrue(
+            _mojo_tls_reset_or_failure(
+                "tls read: errno " + str(errno.ECONNRESET)
+            )
+        )
+        self.assertFalse(_mojo_tls_reset_or_failure("tls write: errno 1"))
+
+    def test_handshake_failure_without_version_is_rejection(self):
+        result = CompletedProcess(
+            1, "", "tls: handshake failed: ssl/tls alert"
+        )
+        self.assertTrue(_mojo_client_failed_required_mtls(result))
+
+    def test_post_handshake_reset_still_counts(self):
+        result = CompletedProcess(
+            1,
+            "VERSION TLSv1.3\nALPN h2\n",
+            "tls write: errno " + str(errno.EPIPE),
+        )
+        self.assertTrue(_mojo_client_failed_required_mtls(result))
+
+    def test_success_is_not_rejection(self):
+        result = CompletedProcess(0, "VERSION TLSv1.3\nALPN h2\nOK 16\n", "")
+        self.assertFalse(_mojo_client_failed_required_mtls(result))
 
 
 if __name__ == "__main__":
