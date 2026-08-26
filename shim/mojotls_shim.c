@@ -29,6 +29,8 @@
 #include <openssl/x509v3.h>
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -323,6 +325,61 @@ int mts_ssl_connect(void *s) {
     int io_errno = errno;
     int result = n == 1 ? 0 : -SSL_get_error(ssl, n);
     mts_sigpipe_guard_end(&guard, io_errno);
+    return result;
+}
+
+/* TLS 1.3 can report SSL_connect success before a post-handshake alert
+ * (rejected client certificate) is processed. Peek without blocking. When
+ * this session presented a client certificate on a blocking socket, wait
+ * briefly for POLLIN so that alert is not missed. */
+int mts_ssl_confirm_connect(void *s) {
+    SSL *ssl = ((mts_ssl *)s)->ssl;
+    int fd = SSL_get_fd(ssl);
+    if (fd < 0) return -SSL_ERROR_SYSCALL;
+
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) return -SSL_ERROR_SYSCALL;
+    int blocking = (flags & O_NONBLOCK) == 0;
+    int wait_for_alert = blocking && SSL_get_certificate(ssl) != NULL;
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) return -SSL_ERROR_SYSCALL;
+
+    unsigned char buf[1];
+    int result = 0;
+    int attempts = wait_for_alert ? 2 : 1;
+    int i;
+    for (i = 0; i < attempts; i++) {
+        if (i == 1) {
+            struct pollfd pfd;
+            memset(&pfd, 0, sizeof(pfd));
+            pfd.fd = fd;
+            pfd.events = POLLIN | POLLERR | POLLHUP;
+            int pr = poll(&pfd, 1, 50);
+            if (pr <= 0) break;
+        }
+        mts_sigpipe_guard guard;
+        if (mts_sigpipe_guard_begin(&guard) != 0) {
+            result = -SSL_ERROR_SYSCALL;
+            break;
+        }
+        ERR_clear_error();
+        errno = 0;
+        int n = SSL_peek(ssl, buf, 1);
+        int io_errno = errno;
+        if (n > 0) {
+            result = 0;
+            mts_sigpipe_guard_end(&guard, io_errno);
+            break;
+        }
+        int error = SSL_get_error(ssl, n);
+        mts_sigpipe_guard_end(&guard, io_errno);
+        if (error == SSL_ERROR_WANT_READ || error == SSL_ERROR_WANT_WRITE) {
+            result = 0;
+            continue;
+        }
+        result = -error;
+        break;
+    }
+    (void)fcntl(fd, F_SETFL, flags);
     return result;
 }
 

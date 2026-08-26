@@ -26,6 +26,8 @@ comptime SELFSIGNED_CERT = "build/certs/selfsigned.pem"
 comptime SELFSIGNED_KEY = "build/certs/selfsigned.key"
 comptime CLIENT_CERT = "build/certs/client-chain.pem"
 comptime CLIENT_KEY = "build/certs/client.key"
+comptime UNTRUSTED_CLIENT_CERT = "build/certs/untrusted_client.pem"
+comptime UNTRUSTED_CLIENT_KEY = "build/certs/untrusted_client.key"
 comptime CLIENT_ENCRYPTED_KEY = "build/certs/client-encrypted.key"
 comptime MALFORMED_NUL_CERT = "build/certs/malformed_nul.pem"
 comptime MALFORMED_NUL_KEY = "build/certs/malformed_nul.key"
@@ -178,6 +180,31 @@ def test_required_client_certificate() raises:
     stream.write_all("auth".as_bytes())
     assert_equal(String(from_utf8=stream.read_exact(4)), "auth")
     stream.close()
+    reap(server[1])
+
+
+def test_reject_untrusted_client_certificate() raises:
+    var server = fork_tls_echo_server(
+        SERVER_CERT,
+        SERVER_KEY,
+        ["h2"],
+        client_ca=CA,
+        require_client_cert=True,
+    )
+    var ctx = TLSContext.client(
+        ca_file=String(CA),
+        cert_chain_pem=String(UNTRUSTED_CLIENT_CERT),
+        key_pem=String(UNTRUSTED_CLIENT_KEY),
+        alpn=["h2"],
+    )
+    var tcp = TCPStream.connect("127.0.0.1", server[0])
+    var raised = False
+    try:
+        _ = ctx.connect(tcp^, "localhost")
+    except e:
+        raised = True
+        assert_true("handshake" in String(e), String(e))
+    assert_true(raised, "untrusted client certificate must fail connect")
     reap(server[1])
 
 
@@ -594,6 +621,7 @@ def test_client_identity_configuration() raises:
 def main() raises:
     test_handshake_echo_alpn()
     test_required_client_certificate()
+    test_reject_untrusted_client_certificate()
     test_clean_eof()
     test_reject_untrusted_ca()
     test_reject_wrong_hostname()

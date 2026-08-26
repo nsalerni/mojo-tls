@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Client `connect()` fails closed when the peer rejects the client
+  certificate with a post-handshake alert, instead of returning a live
+  stream that dies on the first write.
 - Treats a TCP reset during first I/O as a rejected client certificate in
   the CPython differential. Only `EPIPE` and `ECONNRESET` on the current
   platform count as that reset path.

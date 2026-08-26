@@ -329,7 +329,8 @@ struct TLSContext(Movable):
             The established TLS stream.
 
         Raises:
-            If the handshake fails, including certificate rejection.
+            If the handshake fails, including a post-handshake alert that
+            rejects the client certificate.
         """
         var handshake = self.start_connect(tcp^, sni)
         if not handshake.advance():
@@ -495,7 +496,8 @@ struct TLSHandshake(Movable):
             descriptor must first satisfy `wants_read()` or `wants_write()`.
 
         Raises:
-            On certificate, protocol, or transport failure.
+            On certificate, protocol, or transport failure, including a
+            post-handshake alert that rejects the client certificate.
         """
         if self._complete:
             return True
@@ -505,6 +507,14 @@ struct TLSHandshake(Movable):
         else:
             rc = self._lib.get_function[c_int]("mts_ssl_connect")(self._ssl)
         if Int(rc) == 0:
+            if not self._is_server:
+                var confirm = self._lib.get_function[c_int](
+                    "mts_ssl_confirm_connect"
+                )(self._ssl)
+                if Int(confirm) != 0:
+                    if Int(confirm) == _SYSCALL_ERROR:
+                        raise os_error("tls handshake")
+                    raise _shim_error(self._lib, "tls: handshake failed")
             self._complete = True
             return True
         if Int(rc) == _WANT_READ:

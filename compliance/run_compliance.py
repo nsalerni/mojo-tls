@@ -718,6 +718,23 @@ def _mojo_tls_reset_or_failure(client_output: str) -> bool:
     return False
 
 
+def _mojo_client_failed_required_mtls(result) -> bool:
+    """True when the Mojo client did not obtain a usable TLS session.
+
+    TLS 1.3 can print VERSION/ALPN and then die on a post-handshake alert.
+    Fail-closed connect() instead raises during handshake with no VERSION.
+    """
+    if result.returncode == 0:
+        return False
+    client_output = result.stdout + result.stderr
+    if "VERSION TLSv1.3" in result.stdout and "ALPN h2" in result.stdout:
+        return _mojo_tls_reset_or_failure(client_output)
+    return (
+        "VERSION " not in result.stdout
+        and "handshake" in client_output.lower()
+    )
+
+
 def mojo_client_rejected_by_required_python_server(
     *,
     expected_reason: str | None = None,
@@ -749,13 +766,7 @@ def mojo_client_rejected_by_required_python_server(
         args.extend([str(CERTS / cert), str(CERTS / key)])
     result = run_tool("tls_probe_client", *args, timeout=60)
     thread.join(timeout=30)
-    client_output = result.stdout + result.stderr
-    mojo_tls_failure = (
-        result.returncode != 0
-        and _mojo_tls_reset_or_failure(client_output)
-        and "VERSION TLSv1.3" in result.stdout
-        and "ALPN h2" in result.stdout
-    )
+    mojo_tls_failure = _mojo_client_failed_required_mtls(result)
     expected_peer_failure = True
     if expected_reason is not None:
         expected_peer_failure = results.get("error_reason") == expected_reason
