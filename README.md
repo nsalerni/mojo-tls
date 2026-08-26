@@ -82,6 +82,13 @@ RFC 6125 hostname checks when SNI is set). TLS 1.2 is the floor.
 `TLSContext.start_connect()` / `start_accept()` drive non-blocking handshakes.
 The finished `TLSStream` implements both `IOStream` and `ReadinessStream`.
 
+## Concurrency
+
+Handshake and record-layer I/O are blocking on one stream, or readiness-driven
+through `start_connect` / `start_accept` and `Poller`. There is no thread pool.
+One handshake advances on the thread that calls `advance()`. Scale-out is
+several processes, not an in-process async runtime.
+
 ## Compliance
 
 Live checks against CPython's `ssl` module in both roles. Current results:
