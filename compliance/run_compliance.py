@@ -13,6 +13,7 @@ With --json PATH, also dumps {"sections": {...}} for the umbrella suite.
 """
 
 import argparse
+import errno
 import ipaddress
 import json
 import os
@@ -695,8 +696,7 @@ def python_client_peer_snapshot(
 
 
 _TLS_SYSCALL_ERRNO = re.compile(r"tls (?:read|write|handshake): errno (\d+)")
-# EPIPE, ECONNRESET (macOS), ECONNRESET (Linux).
-_TLS_RESET_ERRNOS = {32, 54, 104}
+_TLS_RESET_ERRNOS = {errno.EPIPE, errno.ECONNRESET}
 
 
 def _mojo_tls_reset_or_failure(client_output: str) -> bool:

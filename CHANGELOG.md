@@ -3,8 +3,8 @@
 ## Unreleased
 
 - Treats a TCP reset during first I/O as a rejected client certificate in
-  the CPython differential. Only EPIPE (32) and ECONNRESET (54 on macOS,
-  104 on Linux) count as that reset path.
+  the CPython differential. Only `EPIPE` and `ECONNRESET` on the current
+  platform count as that reset path.
 - Shortened the README and added contributor, issue, and pull-request
   templates.
 
