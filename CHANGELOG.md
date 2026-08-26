@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Shortened the README and added contributor, issue, and pull-request
+  templates.
+
 ## 0.3.0 - 2026-08-25
 
 - Added a local blocking client example with CA, hostname, ALPN, certificate,
