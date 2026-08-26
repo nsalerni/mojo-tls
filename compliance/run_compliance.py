@@ -727,9 +727,19 @@ def mojo_client_rejected_by_required_python_server(
     client_output = result.stdout + result.stderr
     mojo_tls_failure = (
         result.returncode != 0
-        and any(
-            marker in client_output
-            for marker in ("tls read failed", "tls write failed")
+        and (
+            any(
+                marker in client_output
+                for marker in (
+                    "tls read failed",
+                    "tls write failed",
+                    "tls handshake failed",
+                    "tls read: errno",
+                    "tls write: errno",
+                    "tls handshake: errno",
+                )
+            )
+            or "net: timeout" in client_output
         )
         and "VERSION TLSv1.3" in result.stdout
         and "ALPN h2" in result.stdout

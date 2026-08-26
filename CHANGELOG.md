@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Treats a TCP reset during first I/O as a rejected client certificate in
+  the CPython differential, matching `tls write: errno 104` on Ubuntu.
 - Shortened the README and added contributor, issue, and pull-request
   templates.
 
