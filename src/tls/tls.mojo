@@ -214,7 +214,7 @@ struct TLSContext(Movable):
         Raises:
             If the shim, trust store, identity, or ALPN configuration fails.
         """
-        if (cert_chain_pem == "") != (key_pem == ""):
+        if (cert_chain_pem.byte_length() == 0) != (key_pem.byte_length() == 0):
             raise Error(
                 "tls: client certificate and key must be provided together"
             )
@@ -224,7 +224,7 @@ struct TLSContext(Movable):
             raise _shim_error(lib, "tls: context creation failed")
         var out = TLSContext(_lib=lib^, _ctx=ctx, _is_server=False)
         if verify:
-            if ca_file != "":
+            if ca_file.byte_length() != 0:
                 var path = String(ca_file)
                 var rc = out._lib.get_function[c_int]("mts_ctx_load_ca")(
                     out._ctx, path.as_c_string_slice()
@@ -240,7 +240,7 @@ struct TLSContext(Movable):
         out._lib.get_function[NoneType]("mts_ctx_set_verify")(
             out._ctx, c_int(1 if verify else 0)
         )
-        if cert_chain_pem != "":
+        if cert_chain_pem.byte_length() != 0:
             var cert = String(cert_chain_pem)
             var key = String(key_pem)
             var rc = out._lib.get_function[c_int]("mts_ctx_load_identity")(
@@ -282,7 +282,7 @@ struct TLSContext(Movable):
         Raises:
             If the shim, identity, client CA, or ALPN configuration fails.
         """
-        if require_client_cert != (client_ca_file != ""):
+        if require_client_cert != (client_ca_file.byte_length() != 0):
             raise Error(
                 "tls: client CA and require_client_cert must be provided"
                 " together"
