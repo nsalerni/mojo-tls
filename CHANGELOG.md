@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `TLSContext.client` and `server` take `StringSpan` for CA, certificate,
+  and key filesystem paths. Values are copied to `String` at the OpenSSL
+  FFI boundary.
+
 - Documented that TLS 1.3 session tickets are OpenSSL work, not blocked on
   Mojo 1.0.
 - Documented the blocking vs readiness-driven handshake contract.
