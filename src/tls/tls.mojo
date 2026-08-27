@@ -190,9 +190,9 @@ struct TLSContext(Movable):
     def client(
         *,
         verify: Bool = True,
-        ca_file: String = "",
-        cert_chain_pem: String = "",
-        key_pem: String = "",
+        ca_file: StringSpan = "",
+        cert_chain_pem: StringSpan = "",
+        key_pem: StringSpan = "",
         alpn: List[String] = List[String](),
     ) raises -> TLSContext:
         """Builds a client-side context.
@@ -200,12 +200,12 @@ struct TLSContext(Movable):
         Args:
             verify: Verify the server certificate chain (and, when SNI is
                 given to `connect`, the hostname). Disable only in tests.
-            ca_file: PEM bundle of trust anchors; empty uses the
+            ca_file: Path to a PEM bundle of trust anchors; empty uses the
                 environment's default trust store.
-            cert_chain_pem: Client certificate chain to present when the
-                server requests one. Must be paired with `key_pem`.
-            key_pem: Unencrypted private key for `cert_chain_pem`. Encrypted
-                keys fail without prompting for a passphrase.
+            cert_chain_pem: Path to the client certificate chain presented
+                when the server requests one. Must be paired with `key_pem`.
+            key_pem: Path to the unencrypted private key for `cert_chain_pem`.
+                Encrypted keys fail without prompting for a passphrase.
             alpn: Protocols to offer, most preferred first (e.g. "h2").
 
         Returns:
@@ -214,7 +214,7 @@ struct TLSContext(Movable):
         Raises:
             If the shim, trust store, identity, or ALPN configuration fails.
         """
-        if (cert_chain_pem == "") != (key_pem == ""):
+        if (cert_chain_pem.byte_length() == 0) != (key_pem.byte_length() == 0):
             raise Error(
                 "tls: client certificate and key must be provided together"
             )
@@ -224,8 +224,8 @@ struct TLSContext(Movable):
             raise _shim_error(lib, "tls: context creation failed")
         var out = TLSContext(_lib=lib^, _ctx=ctx, _is_server=False)
         if verify:
-            if ca_file != "":
-                var path = ca_file.copy()
+            if ca_file.byte_length() != 0:
+                var path = String(ca_file)
                 var rc = out._lib.get_function[c_int]("mts_ctx_load_ca")(
                     out._ctx, path.as_c_string_slice()
                 )
@@ -240,9 +240,9 @@ struct TLSContext(Movable):
         out._lib.get_function[NoneType]("mts_ctx_set_verify")(
             out._ctx, c_int(1 if verify else 0)
         )
-        if cert_chain_pem != "":
-            var cert = cert_chain_pem.copy()
-            var key = key_pem.copy()
+        if cert_chain_pem.byte_length() != 0:
+            var cert = String(cert_chain_pem)
+            var key = String(key_pem)
             var rc = out._lib.get_function[c_int]("mts_ctx_load_identity")(
                 out._ctx,
                 cert.as_c_string_slice(),
@@ -257,10 +257,10 @@ struct TLSContext(Movable):
 
     @staticmethod
     def server(
-        cert_chain_pem: String,
-        key_pem: String,
+        cert_chain_pem: StringSpan,
+        key_pem: StringSpan,
         *,
-        client_ca_file: String = "",
+        client_ca_file: StringSpan = "",
         require_client_cert: Bool = False,
         alpn: List[String] = List[String](),
     ) raises -> TLSContext:
@@ -282,14 +282,14 @@ struct TLSContext(Movable):
         Raises:
             If the shim, identity, client CA, or ALPN configuration fails.
         """
-        if require_client_cert != (client_ca_file != ""):
+        if require_client_cert != (client_ca_file.byte_length() != 0):
             raise Error(
                 "tls: client CA and require_client_cert must be provided"
                 " together"
             )
         var lib = OwnedDLHandle(_shim_path())
-        var cert = cert_chain_pem.copy()
-        var key = key_pem.copy()
+        var cert = String(cert_chain_pem)
+        var key = String(key_pem)
         var ctx = lib.get_function[UInt64]("mts_ctx_new_server")(
             cert.as_c_string_slice(), key.as_c_string_slice()
         )
@@ -297,7 +297,7 @@ struct TLSContext(Movable):
             raise _shim_error(lib, "tls: loading certificate/key")
         var out = TLSContext(_lib=lib^, _ctx=ctx, _is_server=True)
         if require_client_cert:
-            var client_ca = client_ca_file.copy()
+            var client_ca = String(client_ca_file)
             var rc = out._lib.get_function[c_int](
                 "mts_ctx_require_client_cert"
             )(out._ctx, client_ca.as_c_string_slice())
