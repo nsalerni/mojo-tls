@@ -4,8 +4,19 @@ Shipped work lives in [CHANGELOG.md](CHANGELOG.md).
 
 ## Open
 
+These are not blocked on Mojo 1.0 or another package:
+
 - TLS 1.3 session tickets, so reconnecting clients can skip a round trip.
-  Verified by CPython `session_reused` checks and handshake-count assertions.
+  OpenSSL already exposes the session APIs; this package has not wired
+  ticket store/resume yet. Verify with CPython `session_reused` checks and
+  handshake-count assertions once it lands.
+
+## Blocked
+
+Nothing currently in scope is waiting on a Mojo language feature. Client
+certificates, SNI, ALPN, hostname verification, and readiness-driven
+handshakes already ship. HTTP/3 and QUIC are different protocols, not TLS
+extensions of this stream.
 
 ## Scope
 
