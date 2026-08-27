@@ -14,6 +14,17 @@ python3 tools/fetch_deps.py
 pixi run test
 ```
 
+## Style
+
+- Public APIs follow the
+  [Mojo docstring style](https://github.com/modular/modular/blob/main/mojo/stdlib/docs/docstring-style-guide.md).
+- This repo targets Mojo 1.0: `def` only (no `fn`), `comptime` not `alias`,
+  `std.`-prefixed imports, and explicit `.copy()` / `^` moves. SNI and
+  other borrowed text take `StringSpan`. Filesystem paths that become C
+  strings on the OpenSSL boundary are owned `String` values.
+  Tests are plain executables run by `tools/run_tests.py` (`mojo test` no
+  longer exists).
+
 ## Checks
 
 ```sh
