@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Documented that TLS 1.3 session tickets are OpenSSL work, not blocked on
+  Mojo 1.0.
 - Documented the blocking vs readiness-driven handshake contract.
 - Client `connect()` fails closed when the peer rejects the client
   certificate with a post-handshake alert, instead of returning a live
