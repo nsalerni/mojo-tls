@@ -664,6 +664,20 @@ def test_session_ticket_resume() raises:
     reap(pid)
 
 
+def test_write_timeout_after_wrap() raises:
+    var server = fork_tls_echo_server(SERVER_CERT, SERVER_KEY, ["h2"])
+    var ctx = TLSContext.client(ca_file=String(CA), alpn=["h2"])
+    var tcp = TCPStream.connect("127.0.0.1", server[0])
+    var stream = ctx.connect(tcp^, "localhost")
+    stream.set_write_timeout(1_000_000_000)
+    stream.set_read_timeout(1_000_000_000)
+    stream.write_all("ping".as_bytes())
+    assert_equal(String(from_utf8=stream.read_exact(4)), "ping")
+    stream.set_write_timeout(0)
+    stream.close()
+    reap(server[1])
+
+
 def main() raises:
     test_handshake_echo_alpn()
     test_required_client_certificate()
@@ -680,4 +694,5 @@ def main() raises:
     test_bad_cert_paths()
     test_client_identity_configuration()
     test_session_ticket_resume()
+    test_write_timeout_after_wrap()
     print("test_tls: all tests passed")

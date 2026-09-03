@@ -40,6 +40,8 @@ def main() raises:
     tcp.set_read_timeout(10_000_000_000)
     tcp.set_write_timeout(10_000_000_000)
     var stream = context.connect(tcp^, "localhost")
+    stream.set_read_timeout(10_000_000_000)
+    stream.set_write_timeout(10_000_000_000)
 
     if stream.negotiated_alpn() != ALPN:
         raise Error("TLS server did not negotiate " + ALPN)

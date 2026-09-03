@@ -2,14 +2,19 @@
 
 ## Unreleased
 
+## 0.3.2 - 2026-09-03
+
+- `TLSStream.set_write_timeout` is the `IOStream` method required by
+  mojo-net 0.2.5. It forwards to the underlying `TCPStream`, so callers
+  can bound writes after wrap. The conda recipe now requires
+  `mojo-net >=0.2.5`.
+
 ## 0.3.1 - 2026-09-03
 
 - TLS 1.3 session tickets resume the handshake. `TLSStream.session()`
   exports a ticket after application I/O; pass it to `connect` /
   `start_connect` as `session=`. Early data is never sent. Checked
   against CPython `session_reused`.
-- `TLSStream.set_write_timeout` forwards to the underlying `TCPStream`
-  so the type still conforms to `IOStream` after mojo-net 0.2.5.
 
 - `TLSContext.client` and `server` take `StringSpan` for CA, certificate,
   and key filesystem paths. Values are copied to `String` at the OpenSSL
