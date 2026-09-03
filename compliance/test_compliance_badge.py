@@ -35,7 +35,7 @@ class ComplianceBadgeTest(unittest.TestCase):
         self.assertEqual(payload, {
             "schemaVersion": 1,
             "label": "TLS compliance",
-            "message": "32/32 checks",
+            "message": "34/34 checks",
             "color": "brightgreen",
         })
         serialized = compliance_badge_json(results)
@@ -49,7 +49,7 @@ class ComplianceBadgeTest(unittest.TestCase):
 
         payload = compliance_badge_payload(results)
 
-        self.assertEqual(payload["message"], "31/32 checks")
+        self.assertEqual(payload["message"], "33/34 checks")
         self.assertEqual(payload["color"], "red")
 
     def test_missing_check_cannot_produce_a_green_badge(self):
@@ -58,7 +58,7 @@ class ComplianceBadgeTest(unittest.TestCase):
 
         payload = compliance_badge_payload(results)
 
-        self.assertEqual(payload["message"], "31/32 checks")
+        self.assertEqual(payload["message"], "33/34 checks")
         self.assertEqual(payload["color"], "red")
 
     def test_missing_check_cannot_produce_a_green_report(self):
@@ -78,11 +78,11 @@ class ComplianceBadgeTest(unittest.TestCase):
                 self.assertFalse(write_html_report())
 
             self.assertIn(
-                "31/32 registered checks passed; results incomplete",
+                "33/34 registered checks passed; results incomplete",
                 markdown.read_text(),
             )
             self.assertIn(
-                "31/32</span><span>registered checks passed; results incomplete",
+                "33/34</span><span>registered checks passed; results incomplete",
                 html.read_text(),
             )
 

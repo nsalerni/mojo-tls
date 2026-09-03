@@ -72,6 +72,8 @@ EXPECTED_TLS_CHECKS = (
     "truncated TLS transport is rejected by Mojo and CPython",
     "fatal session teardown does not contaminate the next nonblocking TLS session",
     "reset peers with rejected ALPN do not terminate the server",
+    "Mojo client resumes a TLS 1.3 ticket against CPython",
+    "CPython client resumes a TLS 1.3 ticket against Mojo",
 )
 
 RESULTS: dict[str, list[tuple[str, bool, str]]] = {}
@@ -1733,6 +1735,128 @@ def section_tls():
         f"signal_probe={signal_probe_detail} err={proc.stderr.read()[:150]!r}",
     )
 
+    # TLS 1.3 tickets resume the handshake only. Early data stays off.
+    resume_results: dict = {"ready": threading.Event(), "reused": []}
+
+    def py_two_connection_echo():
+        lsock = socket.socket()
+        lsock.bind(("127.0.0.1", 0))
+        lsock.listen(2)
+        resume_results["port"] = lsock.getsockname()[1]
+        resume_results["ready"].set()
+        try:
+            for _ in range(2):
+                conn, _ = lsock.accept()
+                conn.settimeout(30)
+                tls = ctx.wrap_socket(conn, server_side=True)
+                resume_results["reused"].append(tls.session_reused)
+                while True:
+                    chunk = tls.recv(65536)
+                    if not chunk:
+                        break
+                    tls.sendall(chunk)
+                tls.close()
+        except Exception as error:
+            resume_results["error"] = repr(error)
+        finally:
+            lsock.close()
+
+    ctx = py_server_ctx("server.pem", "server.key", ["h2"])
+    thread = threading.Thread(target=py_two_connection_echo, daemon=True)
+    thread.start()
+    resume_results["ready"].wait(10)
+    client = run_tool(
+        "tls_resume_client",
+        resume_results["port"],
+        str(CERTS / "ca.pem"),
+        timeout=60,
+    )
+    thread.join(timeout=30)
+    first_line = ""
+    second_line = ""
+    for line in client.stdout.splitlines():
+        if line.startswith("FIRST "):
+            first_line = line
+        elif line.startswith("SECOND "):
+            second_line = line
+    record(
+        "tls",
+        "Mojo client resumes a TLS 1.3 ticket against CPython",
+        client.returncode == 0
+        and first_line.startswith("FIRST reused=0")
+        and "ticket=" in first_line
+        and first_line.split("ticket=")[-1] != "0"
+        and second_line == "SECOND reused=1"
+        and resume_results.get("reused") == [False, True],
+        f"rc={client.returncode} out={client.stdout.strip()!r} "
+        f"err={client.stderr[:150]!r} server={resume_results!r}",
+    )
+
+    proc = subprocess.Popen(
+        [
+            *MOJO_RUN,
+            str(TOOLS / "tls_resume_server.mojo"),
+            str(CERTS / "server.pem"),
+            str(CERTS / "server.key"),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=ROOT,
+    )
+    cpython_ok = False
+    cpython_detail = ""
+    try:
+        port_line = proc.stdout.readline().strip()
+        port = int(port_line.removeprefix("PORT "))
+        cctx = ssl.create_default_context(cafile=str(CERTS / "ca.pem"))
+        cctx.set_alpn_protocols(["h2"])
+        first = cctx.wrap_socket(
+            socket.create_connection(("127.0.0.1", port), timeout=10),
+            server_hostname="localhost",
+        )
+        first.sendall(b"ping")
+        ping = first.recv(4)
+        first_reused = first.session_reused
+        session = first.session
+        first.close()
+        second = cctx.wrap_socket(
+            socket.create_connection(("127.0.0.1", port), timeout=10),
+            server_hostname="localhost",
+            session=session,
+        )
+        second.sendall(b"pong")
+        pong = second.recv(4)
+        second_reused = second.session_reused
+        second.close()
+        done = proc.stdout.readline().strip()
+        cpython_ok = (
+            ping == b"ping"
+            and pong == b"pong"
+            and first_reused is False
+            and second_reused is True
+            and session is not None
+            and done == "DONE"
+        )
+        cpython_detail = (
+            f"first_reused={first_reused} second_reused={second_reused} "
+            f"echoed={ping!r}/{pong!r} done={done!r}"
+        )
+    except Exception as error:
+        cpython_detail = repr(error)
+    finally:
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+    record(
+        "tls",
+        "CPython client resumes a TLS 1.3 ticket against Mojo",
+        cpython_ok and proc.returncode == 0,
+        f"{cpython_detail} rc={proc.returncode} err={proc.stderr.read()[:150]!r}",
+    )
+
 
 HTML_REPORT = ROOT / "COMPLIANCE.html"
 
@@ -1812,7 +1936,10 @@ HTML_THESIS = (
     " same reasons the reference rejects them."
 )
 HTML_GAPS = [
-    ("Session resumption", "Every connection is a full handshake for now."),
+    (
+        "0-RTT early data",
+        "Session tickets resume the handshake only. Early application data is disabled.",
+    ),
 ]
 HTML_SECTIONS = {
     "tls": ("`tls` vs CPython `ssl`",
