@@ -2,7 +2,7 @@
   "dir": ".deps",
   "deps": {
     "mojo-net": {
-      "ref": "v0.2.1"
+      "ref": "cursor/wakeup-pipe-21d9"
     }
   }
 }
