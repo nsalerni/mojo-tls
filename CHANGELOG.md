@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Pin the source checkout and conda lower bound to mojo-net 0.2.6.
+  Until that tag exists, `deps.json` tracks the stacked release branch.
+
 ## 0.3.2 - 2026-09-03
 
 - `TLSStream.set_write_timeout` is the `IOStream` method required by
