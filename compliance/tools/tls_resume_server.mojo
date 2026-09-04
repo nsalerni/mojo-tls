@@ -12,13 +12,11 @@ from tls import TLSContext
 def serve_one(mut ctx: TLSContext, mut listener: TCPListener) raises:
     var tcp = listener.accept()
     var stream = ctx.accept(tcp^)
-    while True:
-        var buf = List[Byte]()
-        buf.resize(4096, 0)
-        var n = stream.read(buf)
-        if n == 0:
-            break
-        stream.write_all(Span(buf))
+    # One request/response, then close. CPython's SSLSocket.close() often
+    # drops the TCP connection without close_notify; a read-until-EOF loop
+    # would raise unexpected-eof and skip the second accept.
+    var got = stream.read_exact(4)
+    stream.write_all(Span(got))
     stream.close()
 
 
