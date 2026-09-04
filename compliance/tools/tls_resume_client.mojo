@@ -9,10 +9,10 @@
 from std.sys import argv
 
 from net import TCPStream
-from tls import TLSContext
+from tls import TLSContext, TLSStream
 
 
-def echo(stream, payload: StringSpan) raises:
+def echo(mut stream: TLSStream, payload: StringSpan) raises:
     stream.write_all(payload.as_bytes())
     var got = stream.read_exact(payload.byte_length())
     if String(from_utf8=got) != String(payload):

@@ -182,6 +182,16 @@ void *mts_ctx_new_server(const char *cert_chain_pem, const char *key_pem) {
     SSL_CTX_set_min_proto_version(c->ctx, TLS1_2_VERSION);
     SSL_CTX_set_session_cache_mode(c->ctx, SSL_SESS_CACHE_SERVER);
     SSL_CTX_set_max_early_data(c->ctx, 0);
+    /* OpenSSL refuses to cache or resume server sessions without this. */
+    {
+        static const unsigned char sid_ctx[] = "mojo-tls";
+        if (SSL_CTX_set_session_id_context(
+                c->ctx, sid_ctx, (unsigned int)(sizeof(sid_ctx) - 1)) != 1) {
+            SSL_CTX_free(c->ctx);
+            free(c);
+            return NULL;
+        }
+    }
     if (SSL_CTX_use_certificate_chain_file(c->ctx, cert_chain_pem) != 1 ||
         SSL_CTX_use_PrivateKey_file(c->ctx, key_pem, SSL_FILETYPE_PEM) != 1 ||
         SSL_CTX_check_private_key(c->ctx) != 1) {
