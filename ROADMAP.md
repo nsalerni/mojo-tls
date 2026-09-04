@@ -4,13 +4,9 @@ Shipped work lives in [CHANGELOG.md](CHANGELOG.md).
 
 ## Open
 
-These are not blocked on Mojo 1.0 or another package:
-
-- TLS 1.3 session tickets, so reconnecting clients can resume with a PSK
-  and skip the full certificate handshake. A ticket does not by itself
-  send 0-RTT application data. OpenSSL already exposes the session APIs;
-  this package has not wired ticket store/resume yet. Verify with CPython
-  `session_reused` checks and handshake-count assertions once it lands.
+Nothing currently in scope is waiting on a local API. TLS 1.3 session
+tickets shipped in 0.3.1; a ticket resumes the handshake only and never
+sends 0-RTT application data.
 
 ## Blocked
 

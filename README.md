@@ -5,8 +5,9 @@
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 TLS 1.2 and TLS 1.3 for **Mojo 1.0**: client and server handshakes, SNI,
-hostname verification, ALPN, and certificate verification over
-[mojo-net](https://github.com/nsalerni/mojo-net)'s `TCPStream`.
+hostname verification, ALPN, certificate verification, and TLS 1.3 session
+tickets over [mojo-net](https://github.com/nsalerni/mojo-net)'s `TCPStream`.
+Early data is never sent.
 
 **[Compliance report](https://nsalerni.github.io/mojo-tls/COMPLIANCE.html)**
 ([Markdown](COMPLIANCE.md)) is regenerated on every CI run.
@@ -106,8 +107,7 @@ pixi run compliance
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Session resumption is tracked in
-[ROADMAP.md](ROADMAP.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

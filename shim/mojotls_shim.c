@@ -153,6 +153,9 @@ void *mts_ctx_new_client(void) {
     }
     atomic_init(&c->refs, 1);
     SSL_CTX_set_min_proto_version(c->ctx, TLS1_2_VERSION);
+    /* Resume with a ticket only. Early application data stays off. */
+    SSL_CTX_set_session_cache_mode(c->ctx, SSL_SESS_CACHE_CLIENT);
+    SSL_CTX_set_max_early_data(c->ctx, 0);
     return c;
 }
 
@@ -177,6 +180,18 @@ void *mts_ctx_new_server(const char *cert_chain_pem, const char *key_pem) {
     }
     atomic_init(&c->refs, 1);
     SSL_CTX_set_min_proto_version(c->ctx, TLS1_2_VERSION);
+    SSL_CTX_set_session_cache_mode(c->ctx, SSL_SESS_CACHE_SERVER);
+    SSL_CTX_set_max_early_data(c->ctx, 0);
+    /* OpenSSL refuses to cache or resume server sessions without this. */
+    {
+        static const unsigned char sid_ctx[] = "mojo-tls";
+        if (SSL_CTX_set_session_id_context(
+                c->ctx, sid_ctx, (unsigned int)(sizeof(sid_ctx) - 1)) != 1) {
+            SSL_CTX_free(c->ctx);
+            free(c);
+            return NULL;
+        }
+    }
     if (SSL_CTX_use_certificate_chain_file(c->ctx, cert_chain_pem) != 1 ||
         SSL_CTX_use_PrivateKey_file(c->ctx, key_pem, SSL_FILETYPE_PEM) != 1 ||
         SSL_CTX_check_private_key(c->ctx) != 1) {
@@ -458,6 +473,65 @@ int mts_ssl_version(void *s, char *buf, int cap) {
     memcpy(buf, v, (size_t)l);
     buf[l] = 0;
     return l;
+}
+
+#define MTS_MAX_SESSION_DER (16 * 1024)
+
+/* Copies a resumable session ticket as DER. Returns the length, 0 when no
+ * resumable ticket is available yet, or a negative value on failure.
+ * TLS 1.3 tickets often arrive after the handshake, so callers should
+ * exchange application data first. Early data is never enabled. */
+int mts_ssl_export_session(void *s, unsigned char *out, int cap) {
+    SSL_SESSION *sess;
+    int needed;
+    unsigned char *cursor;
+    int written;
+
+    if (!s || !out || cap <= 0 || cap > MTS_MAX_SESSION_DER) return -1;
+    ERR_clear_error();
+    sess = SSL_get1_session(((mts_ssl *)s)->ssl);
+    if (!sess) {
+        ERR_clear_error();
+        return 0;
+    }
+    if (!SSL_SESSION_is_resumable(sess)) {
+        SSL_SESSION_free(sess);
+        ERR_clear_error();
+        return 0;
+    }
+    needed = i2d_SSL_SESSION(sess, NULL);
+    if (needed <= 0 || needed > MTS_MAX_SESSION_DER || needed > cap) {
+        SSL_SESSION_free(sess);
+        return -1;
+    }
+    cursor = out;
+    written = i2d_SSL_SESSION(sess, &cursor);
+    SSL_SESSION_free(sess);
+    if (written != needed) return -1;
+    ERR_clear_error();
+    return written;
+}
+
+/* Installs a previously exported session for the next handshake. A ticket
+ * does not send 0-RTT application data. Returns 0 on success. */
+int mts_ssl_set_session(void *s, const unsigned char *der, int len) {
+    const unsigned char *cursor;
+    SSL_SESSION *sess;
+    int rc;
+
+    if (!s || !der || len <= 0 || len > MTS_MAX_SESSION_DER) return -1;
+    ERR_clear_error();
+    cursor = der;
+    sess = d2i_SSL_SESSION(NULL, &cursor, (long)len);
+    if (!sess) return -1;
+    SSL_SESSION_set_max_early_data(sess, 0);
+    rc = SSL_set_session(((mts_ssl *)s)->ssl, sess);
+    SSL_SESSION_free(sess);
+    return rc == 1 ? 0 : -1;
+}
+
+int mts_ssl_session_reused(void *s) {
+    return SSL_session_reused(((mts_ssl *)s)->ssl) ? 1 : 0;
 }
 
 long mts_ssl_verify_result(void *s) {

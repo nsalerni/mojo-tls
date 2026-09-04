@@ -15,7 +15,8 @@ both roles, trust-store or custom-CA verification, and optional client
 certificate presentation and server-side client certificate verification,
 wrapped around mojo-net's `TCPStream`.
 `TLSHandshake` supports readiness-driven progress, and `TLSStream` conforms
-to `ReadinessStream` as well as `IOStream`.
+to `ReadinessStream` as well as `IOStream`. TLS 1.3 session tickets resume
+the handshake only; early data is never sent.
 
 Example (client):
 
@@ -36,5 +37,6 @@ from .tls import (
     SubjectAlternativeNames,
     TLSContext,
     TLSHandshake,
+    TLSSession,
     TLSStream,
 )

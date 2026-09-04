@@ -618,6 +618,52 @@ def test_client_identity_configuration() raises:
     )
 
 
+def test_session_ticket_resume() raises:
+    var listener = TCPListener("127.0.0.1", 0)
+    var port = listener.local_port
+    var pid = external_call["fork", c_int]()
+    if pid == 0:
+        try:
+            var ctx = TLSContext.server(SERVER_CERT, SERVER_KEY, alpn=["h2"])
+            var first_tcp = listener.accept()
+            var first = ctx.accept(first_tcp^)
+            var ping = first.read_exact(4)
+            first.write_all(Span(ping))
+            first.close()
+            var second_tcp = listener.accept()
+            var second = ctx.accept(second_tcp^)
+            var pong = second.read_exact(4)
+            second.write_all(Span(pong))
+            second.close()
+        except:
+            pass
+        external_call["_exit", NoneType](c_int(0))
+    listener.close()
+
+    var ctx = TLSContext.client(ca_file=String(CA), alpn=["h2"])
+    var tcp = TCPStream.connect("127.0.0.1", port)
+    var stream = ctx.connect(tcp^, "localhost")
+    assert_true(not stream.session_reused(), "first handshake is full")
+    stream.write_all("ping".as_bytes())
+    assert_equal(String(from_utf8=stream.read_exact(4)), "ping")
+    var ticket = stream.session()
+    if not ticket:
+        stream.close()
+        reap(pid)
+        raise Error("expected a resumable TLS 1.3 ticket after I/O")
+    stream.close()
+
+    var resume_tcp = TCPStream.connect("127.0.0.1", port)
+    var resumed = ctx.connect(
+        resume_tcp^, "localhost", session=ticket.value().copy()
+    )
+    assert_true(resumed.session_reused(), "second handshake resumes")
+    resumed.write_all("pong".as_bytes())
+    assert_equal(String(from_utf8=resumed.read_exact(4)), "pong")
+    resumed.close()
+    reap(pid)
+
+
 def main() raises:
     test_handshake_echo_alpn()
     test_required_client_certificate()
@@ -633,4 +679,5 @@ def main() raises:
     test_nonblocking_handshake_and_partial_io()
     test_bad_cert_paths()
     test_client_identity_configuration()
+    test_session_ticket_resume()
     print("test_tls: all tests passed")

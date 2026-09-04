@@ -2,12 +2,18 @@
 
 ## Unreleased
 
+## 0.3.1 - 2026-09-03
+
+- TLS 1.3 session tickets resume the handshake. `TLSStream.session()`
+  exports a ticket after application I/O; pass it to `connect` /
+  `start_connect` as `session=`. Early data is never sent. Checked
+  against CPython `session_reused`.
+- `TLSStream.set_write_timeout` forwards to the underlying `TCPStream`
+  so the type still conforms to `IOStream` after mojo-net 0.2.5.
+
 - `TLSContext.client` and `server` take `StringSpan` for CA, certificate,
   and key filesystem paths. Values are copied to `String` at the OpenSSL
   FFI boundary.
-
-- Documented that TLS 1.3 session tickets are OpenSSL work, not blocked on
-  Mojo 1.0.
 - Documented the blocking vs readiness-driven handshake contract.
 - Client `connect()` fails closed when the peer rejects the client
   certificate with a post-handshake alert, instead of returning a live

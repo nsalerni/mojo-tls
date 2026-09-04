@@ -45,6 +45,7 @@ comptime _MAX_PEER_NAME = 4096
 comptime _MAX_PEER_SAN_COUNT = 256
 comptime _MAX_PEER_SAN_BYTES = 64 * 1024
 comptime _MAX_PEER_SAN_VALUE = 4096
+comptime _MAX_SESSION_DER = 16 * 1024
 
 
 def _shim_filename() -> String:
@@ -175,11 +176,27 @@ struct PeerCertificate(Copyable, Movable):
 
 
 @fieldwise_init
+struct TLSSession(Copyable, Movable):
+    """Opaque TLS session ticket bytes for handshake resumption.
+
+    Obtained from `TLSStream.session()` after a completed handshake and
+    some application I/O (TLS 1.3 tickets arrive post-handshake). Pass
+    the same value to `TLSContext.connect` / `start_connect`. A ticket
+    resumes the handshake only; it never sends 0-RTT application data.
+    """
+
+    var ticket: List[Byte]
+    """DER-coded `SSL_SESSION` bytes from OpenSSL."""
+
+
+@fieldwise_init
 struct TLSContext(Movable):
     """TLS configuration: role, trust anchors, certificates, and ALPN.
 
     Build one per client or server, then wrap connected TCP streams with
-    `connect()` / `accept()`. TLS 1.2 is the floor on both roles.
+    `connect()` / `accept()`. TLS 1.2 is the floor on both roles. Client
+    `connect` accepts an optional `TLSSession` ticket to resume; early
+    data is never sent.
     """
 
     var _lib: OwnedDLHandle
@@ -316,7 +333,13 @@ struct TLSContext(Movable):
         if Int(rc) != 0:
             raise _shim_error(self._lib, "tls: ALPN configuration")
 
-    def connect(self, var tcp: TCPStream, sni: StringSpan) raises -> TLSStream:
+    def connect(
+        self,
+        var tcp: TCPStream,
+        sni: StringSpan,
+        *,
+        session: Optional[TLSSession] = None,
+    ) raises -> TLSStream:
         """Runs the client handshake over a connected TCP stream.
 
         Args:
@@ -324,6 +347,9 @@ struct TLSContext(Movable):
             sni: Server name for SNI and hostname verification; empty
                 skips both (the chain is still verified when the context
                 verifies).
+            session: Optional ticket from a previous `TLSStream.session()`.
+                Resume skips the full certificate handshake. Early data
+                is never sent.
 
         Returns:
             The established TLS stream.
@@ -332,13 +358,17 @@ struct TLSContext(Movable):
             If the handshake fails, including a post-handshake alert that
             rejects the client certificate.
         """
-        var handshake = self.start_connect(tcp^, sni)
+        var handshake = self.start_connect(tcp^, sni, session=session)
         if not handshake.advance():
             raise Error("tls: blocking handshake requested socket readiness")
         return handshake^.finish()
 
     def start_connect(
-        self, var tcp: TCPStream, sni: StringSpan
+        self,
+        var tcp: TCPStream,
+        sni: StringSpan,
+        *,
+        session: Optional[TLSSession] = None,
     ) raises -> TLSHandshake:
         """Starts a client handshake that may be advanced incrementally.
 
@@ -350,6 +380,7 @@ struct TLSContext(Movable):
         Args:
             tcp: The connected stream; ownership is taken.
             sni: Server name for SNI and hostname verification.
+            session: Optional ticket from a previous `TLSStream.session()`.
 
         Returns:
             A client handshake that advances with socket readiness.
@@ -361,6 +392,18 @@ struct TLSContext(Movable):
         var ssl = lib.get_function[UInt64]("mts_ssl_new")(self._ctx, tcp.fd)
         if ssl == 0:
             raise _shim_error(lib, "tls: session creation")
+        if session:
+            var ticket = session.value().ticket.copy()
+            if len(ticket) == 0 or len(ticket) > _MAX_SESSION_DER:
+                lib.get_function[NoneType]("mts_ssl_free")(ssl)
+                raise Error("tls: invalid session ticket")
+            var session_rc = lib.get_function[c_int]("mts_ssl_set_session")(
+                ssl, ticket.unsafe_ptr(), c_int(len(ticket))
+            )
+            if Int(session_rc) != 0:
+                var err = _shim_error(lib, "tls: session resume")
+                lib.get_function[NoneType]("mts_ssl_free")(ssl)
+                raise err
         var host = String(sni)
         var rc = lib.get_function[c_int]("mts_ssl_set_connect_name")(
             ssl, host.as_c_string_slice()
@@ -736,6 +779,17 @@ struct TLSStream(ReadinessStream):
         """
         self._tcp.set_read_timeout(nanos)
 
+    def set_write_timeout(self, nanos: Int64) raises:
+        """Bounds blocking writes via the underlying stream's timeout.
+
+        Args:
+            nanos: Timeout in nanoseconds; 0 clears it.
+
+        Raises:
+            If the setsockopt call fails.
+        """
+        self._tcp.set_write_timeout(nanos)
+
     def set_nodelay(self, enabled: Bool) raises:
         """Applies the no-delay latency hint to the underlying stream.
 
@@ -781,6 +835,46 @@ struct TLSStream(ReadinessStream):
         )
         buf.shrink(Int(n))
         return String(from_utf8=buf)
+
+    def session(self) raises -> Optional[TLSSession]:
+        """Exports a resumable session ticket, if one is available.
+
+        TLS 1.3 tickets are delivered after the handshake, so call this
+        after some application I/O. Returns None when no resumable ticket
+        exists yet. Early data is never enabled on the exported ticket.
+
+        Returns:
+            Opaque ticket bytes, or None.
+
+        Raises:
+            If the stream is closed or the ticket cannot be encoded.
+        """
+        if not self._open:
+            raise Error("tls: session requested after close")
+        var buf = List[Byte]()
+        buf.resize(_MAX_SESSION_DER, 0)
+        var n = self._lib.get_function[c_int]("mts_ssl_export_session")(
+            self._ssl, buf.unsafe_ptr(), c_int(_MAX_SESSION_DER)
+        )
+        if Int(n) < 0:
+            raise _shim_error(self._lib, "tls: exporting session")
+        if Int(n) == 0:
+            return None
+        buf.shrink(Int(n))
+        return TLSSession(ticket=buf^)
+
+    def session_reused(self) raises -> Bool:
+        """Reports whether this handshake resumed a previous ticket.
+
+        Returns:
+            True when OpenSSL reports `SSL_session_reused`.
+
+        Raises:
+            If the shim symbol cannot be resolved.
+        """
+        return Bool(
+            self._lib.get_function[c_int]("mts_ssl_session_reused")(self._ssl)
+        )
 
     def peer_certificate(self) raises -> Optional[PeerCertificate]:
         """Copies the peer's leaf certificate and verification status.

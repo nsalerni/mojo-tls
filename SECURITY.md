@@ -16,5 +16,6 @@ client certificate.
 Certificate presence is not authentication; require `verified` before trusting
 identity fields. The package does not log certificates.
 
-TLS session resumption is unsupported. The project has not had an external
+TLS session resumption uses TLS 1.3 tickets for the handshake only. Early
+data (0-RTT) is disabled. The project has not had an external
 security review. See [ROADMAP.md](ROADMAP.md).
