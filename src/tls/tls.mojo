@@ -346,7 +346,8 @@ struct TLSContext(Movable):
             tcp: The connected stream; ownership is taken.
             sni: Server name for SNI and hostname verification; empty
                 skips both (the chain is still verified when the context
-                verifies).
+                verifies). An IPv4 or IPv6 literal checks IP SANs and
+                does not send SNI.
             session: Optional ticket from a previous `TLSStream.session()`.
                 Resume skips the full certificate handshake. Early data
                 is never sent.

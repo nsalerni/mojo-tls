@@ -28,6 +28,7 @@
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
 #include <arpa/inet.h>
+#include <netinet/in.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -182,6 +183,8 @@ void *mts_ctx_new_server(const char *cert_chain_pem, const char *key_pem) {
     SSL_CTX_set_min_proto_version(c->ctx, TLS1_2_VERSION);
     SSL_CTX_set_session_cache_mode(c->ctx, SSL_SESS_CACHE_SERVER);
     SSL_CTX_set_max_early_data(c->ctx, 0);
+    SSL_CTX_set_default_passwd_cb(c->ctx, mts_reject_password);
+    SSL_CTX_set_default_passwd_cb_userdata(c->ctx, NULL);
     /* OpenSSL refuses to cache or resume server sessions without this. */
     {
         static const unsigned char sid_ctx[] = "mojo-tls";
@@ -321,6 +324,16 @@ void *mts_ssl_new(void *p, int fd) {
 int mts_ssl_set_connect_name(void *s, const char *sni) {
     SSL *ssl = ((mts_ssl *)s)->ssl;
     if (sni && sni[0]) {
+        struct in_addr v4;
+        struct in6_addr v6;
+        if (inet_pton(AF_INET, sni, &v4) == 1 ||
+            inet_pton(AF_INET6, sni, &v6) == 1) {
+            /* RFC 6066: SNI is a DNS name. Verify IP SANs instead. */
+            X509_VERIFY_PARAM *param = SSL_get0_param(ssl);
+            if (!param || X509_VERIFY_PARAM_set1_ip_asc(param, sni) != 1)
+                return -1;
+            return 0;
+        }
         if (SSL_set_tlsext_host_name(ssl, sni) != 1) return -1;
         if (SSL_set1_host(ssl, sni) != 1) return -1;
     }
