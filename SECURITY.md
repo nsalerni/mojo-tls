@@ -27,3 +27,12 @@ verification (the chain is verified when `verify=True`).
 as a trust boundary. Cipher-suite, OCSP, and CRL policy stay with the
 OpenSSL build. The project has not had an external security review. See
 [ROADMAP.md](ROADMAP.md).
+
+## Residual risks
+
+- An empty connect name skips hostname / IP identity checks. The chain
+  is still verified when `verify=True`. Callers that need name checks
+  must pass a hostname or IP literal; grpc-mojo always passes the host.
+- `$MOJO_TLS_SHIM` is a trust boundary: it loads an arbitrary `.so`.
+- There is no cipher-suite, OCSP, CRL, or pinning API. That stays with
+  the OpenSSL build on purpose.
