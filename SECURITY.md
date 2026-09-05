@@ -17,5 +17,13 @@ Certificate presence is not authentication; require `verified` before trusting
 identity fields. The package does not log certificates.
 
 TLS session resumption uses TLS 1.3 tickets for the handshake only. Early
-data (0-RTT) is disabled. The project has not had an external
-security review. See [ROADMAP.md](ROADMAP.md).
+data (0-RTT) is disabled. Encrypted PEM keys are rejected without a
+passphrase prompt on both the client identity path and server context
+construction. An IPv4 or IPv6 literal as the connect name verifies IP
+SANs and does not send SNI. An empty connect name still skips hostname
+verification (the chain is verified when `verify=True`).
+
+`$MOJO_TLS_SHIM` loads a caller-supplied shared library; treat that path
+as a trust boundary. Cipher-suite, OCSP, and CRL policy stay with the
+OpenSSL build. The project has not had an external security review. See
+[ROADMAP.md](ROADMAP.md).

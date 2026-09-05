@@ -261,6 +261,23 @@ def test_reject_wrong_hostname() raises:
     reap(server[1])
 
 
+def test_ip_literal_hostname() raises:
+    var server = fork_tls_echo_server(SERVER_CERT, SERVER_KEY, ["h2"])
+    var ctx = TLSContext.client(ca_file=String(CA), alpn=["h2"])
+    var tcp = TCPStream.connect("127.0.0.1", server[0])
+    var stream = ctx.connect(tcp^, "127.0.0.1")
+    var peer = stream.peer_certificate()
+    if not peer:
+        raise Error("IP-literal TLS client receives a server certificate")
+    var certificate = peer.value().copy()
+    assert_true(certificate.verified)
+    assert_equal(certificate.matched_name, "127.0.0.1")
+    stream.write_all("ip literal name".as_bytes())
+    assert_equal(String(from_utf8=stream.read_exact(15)), "ip literal name")
+    stream.close()
+    reap(server[1])
+
+
 def test_verify_disabled_accepts_selfsigned() raises:
     var server = fork_tls_echo_server(
         SELFSIGNED_CERT, SELFSIGNED_KEY, List[String]()
@@ -609,6 +626,14 @@ def test_bad_cert_paths() raises:
         assert_true("client certificate" in String(e), String(e))
     assert_true(raised, "an encrypted client key must raise")
 
+    raised = False
+    try:
+        _ = TLSContext.server(SERVER_CERT, CLIENT_ENCRYPTED_KEY)
+    except e:
+        raised = True
+        assert_true("certificate/key" in String(e), String(e))
+    assert_true(raised, "an encrypted server key must raise")
+
 
 def test_client_identity_configuration() raises:
     _ = TLSContext.client(
@@ -685,6 +710,7 @@ def main() raises:
     test_clean_eof()
     test_reject_untrusted_ca()
     test_reject_wrong_hostname()
+    test_ip_literal_hostname()
     test_verify_disabled_accepts_selfsigned()
     test_reject_unsafe_subject_alt_names()
     test_peer_certificate_compatibility_constructor()
