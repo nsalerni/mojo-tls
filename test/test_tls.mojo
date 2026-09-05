@@ -271,7 +271,10 @@ def test_ip_literal_hostname() raises:
         raise Error("IP-literal TLS client receives a server certificate")
     var certificate = peer.value().copy()
     assert_true(certificate.verified)
-    assert_equal(certificate.matched_name, "127.0.0.1")
+    # IP identity uses X509_VERIFY_PARAM_set1_ip_asc; SSL_get0_peername
+    # only reports DNS names set via SSL_set1_host.
+    assert_equal(certificate.matched_name, "")
+    assert_equal(certificate.subject_alt_names.ip_addresses[0], "127.0.0.1")
     stream.write_all("ip literal name".as_bytes())
     assert_equal(String(from_utf8=stream.read_exact(15)), "ip literal name")
     stream.close()

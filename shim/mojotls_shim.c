@@ -329,7 +329,9 @@ int mts_ssl_set_connect_name(void *s, const char *sni) {
         if (inet_pton(AF_INET, sni, &v4) == 1 ||
             inet_pton(AF_INET6, sni, &v6) == 1) {
             /* RFC 6066: SNI is a DNS name. Verify IP SANs instead. */
-            if (SSL_set1_ip_asc(ssl, sni) != 1) return -1;
+            X509_VERIFY_PARAM *param = SSL_get0_param(ssl);
+            if (!param || X509_VERIFY_PARAM_set1_ip_asc(param, sni) != 1)
+                return -1;
             return 0;
         }
         if (SSL_set_tlsext_host_name(ssl, sni) != 1) return -1;
