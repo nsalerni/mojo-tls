@@ -2,8 +2,12 @@
 
 ## Unreleased
 
-- Pin the source checkout and conda lower bound to mojo-net 0.2.6.
-  Until that tag exists, `deps.json` tracks the stacked release branch.
+## 0.3.3 - 2026-09-21
+
+- Pin the source checkout and conda lower bound to mojo-net 0.2.7.
+- Reject encrypted server private keys (no passphrase API).
+- Verify IP-literal connect names with `X509_VERIFY_PARAM_set1_ip_asc`
+  and omit SNI for IP literals (RFC 6066).
 
 ## 0.3.2 - 2026-09-03
 

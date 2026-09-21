@@ -15,7 +15,32 @@ Early data is never sent.
 ## Install
 
 ```sh
-curl -fsSL https://pixi.sh/install.sh | sh
+pixi init my-app && cd my-app
+```
+
+Add the Modular compiler and community channels to `pixi.toml`:
+
+```toml
+[workspace]
+channels = [
+    "https://conda.modular.com/max",
+    "https://repo.prefix.dev/modular-community",
+    "conda-forge",
+]
+platforms = ["osx-arm64", "linux-64", "linux-aarch64"]
+```
+
+```sh
+pixi add mojo-tls
+```
+
+Pulls in [mojo-net](https://github.com/nsalerni/mojo-net). Then
+`from tls import TLSContext`. The package is on
+[modular-community](https://github.com/modular/modular-community).
+
+### From source (contributors)
+
+```sh
 git clone https://github.com/nsalerni/mojo-tls.git
 cd mojo-tls
 pixi install
@@ -101,8 +126,11 @@ pixi run compliance
 
 ## Related packages
 
+Part of the Mojo networking stack:
+
 [mojo-net](https://github.com/nsalerni/mojo-net) ·
 [mojo-http2](https://github.com/nsalerni/mojo-http2) ·
+[protomojo](https://github.com/nsalerni/protomojo) ·
 [grpc-mojo](https://github.com/nsalerni/grpc-mojo)
 
 ## Contributing
