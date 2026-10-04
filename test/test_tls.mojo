@@ -386,6 +386,18 @@ def test_alpn_no_overlap_fails() raises:
     reap(server[1])
 
 
+def test_max_length_alpn_reported() raises:
+    # RFC 7301 allows protocol names up to 255 bytes.
+    var protocol = String("p") * 255
+    var server = fork_tls_echo_server(SERVER_CERT, SERVER_KEY, [protocol])
+    var ctx = TLSContext.client(ca_file=String(CA), alpn=[protocol])
+    var tcp = TCPStream.connect("127.0.0.1", server[0])
+    var stream = ctx.connect(tcp^, "localhost")
+    assert_equal(stream.negotiated_alpn(), protocol)
+    stream.close()
+    reap(server[1])
+
+
 def test_read_timeout_through_tls() raises:
     # Server echoes but we ask for bytes it never sends: the timeout on
     # the underlying stream must surface through the TLS layer, typed.
@@ -718,6 +730,7 @@ def main() raises:
     test_reject_unsafe_subject_alt_names()
     test_peer_certificate_compatibility_constructor()
     test_alpn_no_overlap_fails()
+    test_max_length_alpn_reported()
     test_read_timeout_through_tls()
     test_nonblocking_handshake_and_partial_io()
     test_bad_cert_paths()

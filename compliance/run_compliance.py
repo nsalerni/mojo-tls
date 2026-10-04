@@ -699,11 +699,16 @@ def python_client_peer_snapshot(
 
 _TLS_SYSCALL_ERRNO = re.compile(r"tls (?:read|write|handshake): errno (\d+)")
 _TLS_RESET_ERRNOS = {errno.EPIPE, errno.ECONNRESET}
+# mojo-net's CONNECTION_RESET_ERROR, raised in place of "errno N" for
+# exactly ECONNRESET and EPIPE.
+_NET_CONNECTION_RESET = "net: connection reset"
 
 
 def _mojo_tls_reset_or_failure(client_output: str) -> bool:
     """True when the Mojo client failed after a peer abort or TLS error."""
     if "net: timeout" in client_output:
+        return True
+    if _NET_CONNECTION_RESET in client_output:
         return True
     if any(
         marker in client_output

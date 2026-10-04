@@ -129,6 +129,9 @@ class RequiredMtlsMatcherTest(unittest.TestCase):
         )
         self.assertFalse(_mojo_tls_reset_or_failure("tls write: errno 1"))
 
+    def test_typed_connection_reset_is_peer_abort(self):
+        self.assertTrue(_mojo_tls_reset_or_failure("net: connection reset"))
+
     def test_handshake_failure_without_version_is_rejection(self):
         result = CompletedProcess(
             1, "", "tls: handshake failed: ssl/tls alert"
@@ -140,6 +143,15 @@ class RequiredMtlsMatcherTest(unittest.TestCase):
             1,
             "VERSION TLSv1.3\nALPN h2\n",
             "tls write: errno " + str(errno.EPIPE),
+        )
+        self.assertTrue(_mojo_client_failed_required_mtls(result))
+
+    def test_post_handshake_typed_reset_still_counts(self):
+        result = CompletedProcess(
+            1,
+            "VERSION TLSv1.3\nALPN h2\n",
+            "Unhandled exception caught during execution: "
+            "net: connection reset",
         )
         self.assertTrue(_mojo_client_failed_required_mtls(result))
 

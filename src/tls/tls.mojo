@@ -46,6 +46,7 @@ comptime _MAX_PEER_SAN_COUNT = 256
 comptime _MAX_PEER_SAN_BYTES = 64 * 1024
 comptime _MAX_PEER_SAN_VALUE = 4096
 comptime _MAX_SESSION_DER = 16 * 1024
+comptime _MAX_ALPN_PROTOCOL = 255
 
 
 def _shim_filename() -> String:
@@ -104,7 +105,7 @@ def _alpn_wire(protocols: List[String]) raises -> List[Byte]:
     var out = List[Byte]()
     for p in protocols:
         var bytes = p.as_bytes()
-        if len(bytes) == 0 or len(bytes) > 255:
+        if len(bytes) == 0 or len(bytes) > _MAX_ALPN_PROTOCOL:
             raise Error("tls: invalid ALPN protocol name")
         out.append(UInt8(len(bytes)))
         out.extend(bytes)
@@ -813,9 +814,9 @@ struct TLSStream(ReadinessStream):
             If the shim call fails.
         """
         var buf = List[Byte]()
-        buf.resize(64, 0)
+        buf.resize(_MAX_ALPN_PROTOCOL, 0)
         var n = self._lib.get_function[c_int]("mts_ssl_get_alpn")(
-            self._ssl, buf.unsafe_ptr(), c_int(64)
+            self._ssl, buf.unsafe_ptr(), c_int(_MAX_ALPN_PROTOCOL)
         )
         buf.shrink(Int(n))
         return String(from_utf8=buf)
