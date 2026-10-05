@@ -16,7 +16,8 @@ certificate presentation and server-side client certificate verification,
 wrapped around mojo-net's `TCPStream`.
 `TLSHandshake` supports readiness-driven progress, and `TLSStream` conforms
 to `ReadinessStream` as well as `IOStream`. TLS 1.3 session tickets resume
-the handshake only; early data is never sent.
+the handshake only when they still match the server being connected to;
+early data is never sent.
 
 Example (client):
 

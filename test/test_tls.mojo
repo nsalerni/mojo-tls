@@ -14,7 +14,7 @@ from net import (
     is_timeout_error,
     is_would_block,
 )
-from tls import PeerCertificate, TLSContext
+from tls import PeerCertificate, TLSContext, TLSSession, TLSStream
 
 
 comptime CA = "build/certs/ca.pem"
@@ -752,6 +752,120 @@ def test_session_ticket_resume() raises:
     reap(pid)
 
 
+def fork_two_echo_server(
+    cert: StringSpan, key: StringSpan
+) raises -> Tuple[UInt16, c_int]:
+    """Forks a server that echoes 4 bytes on each of two connections."""
+    var listener = TCPListener("127.0.0.1", 0)
+    var port = listener.local_port
+    var pid = external_call["fork", c_int]()
+    if pid == 0:
+        try:
+            var ctx = TLSContext.server(String(cert), String(key))
+            for _ in range(2):
+                var tcp = listener.accept()
+                var stream = ctx.accept(tcp^)
+                var payload = stream.read_exact(4)
+                stream.write_all(Span(payload))
+                stream.close()
+        except:
+            pass
+        external_call["_exit", NoneType](c_int(0))
+    listener.close()
+    return (port, pid)
+
+
+def take_ticket(mut stream: TLSStream) raises -> TLSSession:
+    var ticket = stream.session()
+    if not ticket:
+        raise Error("expected a resumable TLS 1.3 ticket after I/O")
+    return ticket.value().copy()
+
+
+def test_session_ticket_ip_literal_resume() raises:
+    var server = fork_two_echo_server(SERVER_CERT, SERVER_KEY)
+    var ctx = TLSContext.client(ca_file=String(CA))
+    var tcp = TCPStream.connect("127.0.0.1", server[0])
+    var stream = ctx.connect(tcp^, "127.0.0.1")
+    stream.write_all("ping".as_bytes())
+    assert_equal(String(from_utf8=stream.read_exact(4)), "ping")
+    var ticket = take_ticket(stream)
+    stream.close()
+
+    var resume_tcp = TCPStream.connect("127.0.0.1", server[0])
+    var resumed = ctx.connect(
+        resume_tcp^, "127.0.0.1", session=ticket.copy()
+    )
+    assert_true(resumed.session_reused(), "IP-literal ticket resumes")
+    var peer = resumed.peer_certificate()
+    if not peer:
+        raise Error("resumed IP connection has no peer certificate")
+    assert_true(peer.value().verified, "resumed IP certificate stays verified")
+    resumed.write_all("pong".as_bytes())
+    assert_equal(String(from_utf8=resumed.read_exact(4)), "pong")
+    resumed.close()
+    reap(server[1])
+
+
+def test_session_ticket_wrong_name_rejected() raises:
+    var server = fork_two_echo_server(SERVER_CERT, SERVER_KEY)
+    var ctx = TLSContext.client(ca_file=String(CA))
+    var tcp = TCPStream.connect("127.0.0.1", server[0])
+    var stream = ctx.connect(tcp^, "localhost")
+    stream.write_all("ping".as_bytes())
+    assert_equal(String(from_utf8=stream.read_exact(4)), "ping")
+    var ticket = take_ticket(stream)
+    stream.close()
+
+    var resume_tcp = TCPStream.connect("127.0.0.1", server[0])
+    var raised = False
+    try:
+        _ = ctx.connect(
+            resume_tcp^, "otherhost.example", session=ticket.copy()
+        )
+    except e:
+        raised = True
+        var message = String(e)
+        assert_true("handshake" in message, message)
+        assert_true("certificate verify failed" in message, message)
+    assert_true(
+        raised,
+        "a ticket must not resume under a name the certificate does not cover",
+    )
+    reap(server[1])
+
+
+def test_session_ticket_unverified_rejected() raises:
+    var server = fork_two_echo_server(SELFSIGNED_CERT, SELFSIGNED_KEY)
+    var unverified = TLSContext.client(verify=False)
+    var tcp = TCPStream.connect("127.0.0.1", server[0])
+    var stream = unverified.connect(tcp^, "localhost")
+    stream.write_all("ping".as_bytes())
+    assert_equal(String(from_utf8=stream.read_exact(4)), "ping")
+    var ticket = take_ticket(stream)
+    assert_true(
+        not stream.peer_certificate().value().verified,
+        "the source handshake did not verify the self-signed certificate",
+    )
+    stream.close()
+
+    var verifying = TLSContext.client(ca_file=String(CA))
+    var resume_tcp = TCPStream.connect("127.0.0.1", server[0])
+    var raised = False
+    try:
+        _ = verifying.connect(resume_tcp^, "localhost", session=ticket.copy())
+    except e:
+        raised = True
+        var message = String(e)
+        assert_true("handshake" in message, message)
+        assert_true("certificate verify failed" in message, message)
+    assert_true(
+        raised,
+        "a ticket from an unverified handshake must not satisfy a verifying client",
+    )
+    reap(server[1])
+
+
 def test_write_timeout_after_wrap() raises:
     var server = fork_tls_echo_server(SERVER_CERT, SERVER_KEY, ["h2"])
     var ctx = TLSContext.client(ca_file=String(CA), alpn=["h2"])
@@ -785,5 +899,8 @@ def main() raises:
     test_bad_cert_paths()
     test_client_identity_configuration()
     test_session_ticket_resume()
+    test_session_ticket_ip_literal_resume()
+    test_session_ticket_wrong_name_rejected()
+    test_session_ticket_unverified_rejected()
     test_write_timeout_after_wrap()
     print("test_tls: all tests passed")

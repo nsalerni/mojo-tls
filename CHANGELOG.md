@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- A verifying client ignores a TLS 1.3 session ticket unless its stored
+  verification succeeded, the peer certificate is present and unexpired,
+  and that certificate matches the connect name (hostname or IP literal;
+  an empty name still skips the name check). Anything else falls back to
+  a full handshake, so a ticket cannot make `peer_certificate().verified`
+  true for a name the certificate does not cover.
 - Client `connect()` no longer fails when the server sends `close_notify`
   right after a handshake that presented a client certificate. The stream
   is returned and its first read reports a clean EOF. Fatal alerts still

@@ -182,8 +182,11 @@ struct TLSSession(Copyable, Movable):
 
     Obtained from `TLSStream.session()` after a completed handshake and
     some application I/O (TLS 1.3 tickets arrive post-handshake). Pass
-    the same value to `TLSContext.connect` / `start_connect`. A ticket
-    resumes the handshake only; it never sends 0-RTT application data.
+    the same value to `TLSContext.connect` / `start_connect`. A verifying
+    client uses the ticket only when its stored verification succeeded,
+    the peer certificate is present and unexpired, and that certificate
+    matches the connect name. Otherwise the handshake is a full one.
+    A ticket never sends 0-RTT application data.
     """
 
     var ticket: List[Byte]
@@ -196,8 +199,8 @@ struct TLSContext(Movable):
 
     Build one per client or server, then wrap connected TCP streams with
     `connect()` / `accept()`. TLS 1.2 is the floor on both roles. Client
-    `connect` accepts an optional `TLSSession` ticket to resume; early
-    data is never sent.
+    `connect` accepts an optional `TLSSession` ticket to resume when that
+    ticket still authenticates this server. Early data is never sent.
     """
 
     var _lib: OwnedDLHandle
@@ -350,8 +353,13 @@ struct TLSContext(Movable):
                 verifies). An IPv4 or IPv6 literal checks IP SANs and
                 does not send SNI.
             session: Optional ticket from a previous `TLSStream.session()`.
-                Resume skips the full certificate handshake. Early data
-                is never sent.
+                When this context verifies peers, the ticket is kept only
+                if its stored verification succeeded, the peer certificate
+                is present and unexpired, and that certificate matches
+                `sni`. A hostname is checked as a DNS name and an IP
+                literal as an iPAddress SAN. An empty `sni` skips the name
+                check. A ticket that fails these checks is ignored and the
+                handshake is a full one. Early data is never sent.
 
         Returns:
             The established TLS stream.
@@ -383,6 +391,11 @@ struct TLSContext(Movable):
             tcp: The connected stream; ownership is taken.
             sni: Server name for SNI and hostname verification.
             session: Optional ticket from a previous `TLSStream.session()`.
+                A verifying context keeps it only when the stored
+                verification succeeded, the peer certificate is present
+                and unexpired, and it matches `sni`. An empty `sni` skips
+                the name check. A ticket that fails these checks is
+                ignored and the handshake is a full one.
 
         Returns:
             A client handshake that advances with socket readiness.
@@ -394,19 +407,22 @@ struct TLSContext(Movable):
         var ssl = lib.get_function[UInt64]("mts_ssl_new")(self._ctx, tcp.fd)
         if ssl == 0:
             raise _shim_error(lib, "tls: session creation")
+        var host = String(sni)
         if session:
             var ticket = session.value().ticket.copy()
             if len(ticket) == 0 or len(ticket) > _MAX_SESSION_DER:
                 lib.get_function[NoneType]("mts_ssl_free")(ssl)
                 raise Error("tls: invalid session ticket")
             var session_rc = lib.get_function[c_int]("mts_ssl_set_session")(
-                ssl, ticket.unsafe_ptr(), c_int(len(ticket))
+                ssl,
+                ticket.unsafe_ptr(),
+                c_int(len(ticket)),
+                host.as_c_string_slice(),
             )
             if Int(session_rc) != 0:
                 var err = _shim_error(lib, "tls: session resume")
                 lib.get_function[NoneType]("mts_ssl_free")(ssl)
                 raise err
-        var host = String(sni)
         var rc = lib.get_function[c_int]("mts_ssl_set_connect_name")(
             ssl, host.as_c_string_slice()
         )

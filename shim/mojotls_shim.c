@@ -532,11 +532,55 @@ int mts_ssl_export_session(void *s, unsigned char *out, int cap) {
     return written;
 }
 
-/* Installs a previously exported session for the next handshake. A ticket
- * does not send 0-RTT application data. Returns 0 on success. */
-int mts_ssl_set_session(void *s, const unsigned char *der, int len) {
+static int mts_name_is_ip_literal(const char *name) {
+    struct in_addr ipv4;
+    struct in6_addr ipv6;
+    return inet_pton(AF_INET, name, &ipv4) == 1 ||
+           inet_pton(AF_INET6, name, &ipv6) == 1;
+}
+
+/* Same window as OpenSSL's certificate time check: notBefore <= now and
+ * notAfter still in the future. A comparison error rejects the ticket. */
+static int mts_peer_cert_is_current(const X509 *cert) {
+    const ASN1_TIME *not_before = X509_get0_notBefore(cert);
+    const ASN1_TIME *not_after = X509_get0_notAfter(cert);
+    if (!not_before || !not_after) return 0;
+    if (X509_cmp_current_time(not_before) != -1) return 0;
+    return X509_cmp_current_time(not_after) == 1;
+}
+
+/* Flag 0 is SSL_set1_host's default. An empty name skips the name check,
+ * matching mts_ssl_set_connect_name. IP literals match iPAddress SANs. */
+static int mts_peer_cert_matches_name(X509 *cert, const char *name) {
+    if (!name || name[0] == '\0') return 1;
+    if (mts_name_is_ip_literal(name))
+        return X509_check_ip_asc(cert, name, 0) == 1;
+    return X509_check_host(cert, name, strlen(name), 0, NULL) == 1;
+}
+
+static int mts_session_peer_ok(SSL_SESSION *sess, const char *name) {
+    X509 *peer = SSL_SESSION_get0_peer(sess);
+    if (!peer) return 0;
+    if (!mts_peer_cert_is_current(peer)) return 0;
+    return mts_peer_cert_matches_name(peer, name);
+}
+
+/* Installs a previously exported session for the next handshake.
+ *
+ * Resumption does not run certificate verification again. When this SSL
+ * verifies peers, the ticket is installed only if its stored result is
+ * X509_V_OK (readable on the SSL after SSL_set_session; this OpenSSL has
+ * no session getter), the peer leaf is present and unexpired, and that
+ * leaf matches name. Otherwise the ticket is discarded and the caller
+ * performs a full handshake. name may be empty or NULL. A ticket does
+ * not send 0-RTT application data. Returns 0 when the handshake may
+ * proceed, or -1 when the ticket bytes are unusable. */
+int mts_ssl_set_session(void *s, const unsigned char *der, int len,
+                        const char *name) {
     const unsigned char *cursor;
     SSL_SESSION *sess;
+    SSL *ssl;
+    int verifying;
     int rc;
 
     if (!s || !der || len <= 0 || len > MTS_MAX_SESSION_DER) return -1;
@@ -545,7 +589,23 @@ int mts_ssl_set_session(void *s, const unsigned char *der, int len) {
     sess = d2i_SSL_SESSION(NULL, &cursor, (long)len);
     if (!sess) return -1;
     SSL_SESSION_set_max_early_data(sess, 0);
-    rc = SSL_set_session(((mts_ssl *)s)->ssl, sess);
+
+    ssl = ((mts_ssl *)s)->ssl;
+    verifying = (SSL_get_verify_mode(ssl) & SSL_VERIFY_PEER) != 0;
+    if (verifying && !mts_session_peer_ok(sess, name)) {
+        SSL_SESSION_free(sess);
+        ERR_clear_error();
+        return 0;
+    }
+
+    rc = SSL_set_session(ssl, sess);
+    if (rc == 1 && verifying && SSL_get_verify_result(ssl) != X509_V_OK) {
+        (void)SSL_set_session(ssl, NULL);
+        SSL_set_verify_result(ssl, X509_V_OK);
+        SSL_SESSION_free(sess);
+        ERR_clear_error();
+        return 0;
+    }
     SSL_SESSION_free(sess);
     return rc == 1 ? 0 : -1;
 }
