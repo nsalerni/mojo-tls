@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Client `connect()` no longer fails when the server sends `close_notify`
+  right after a handshake that presented a client certificate. The stream
+  is returned and its first read reports a clean EOF. Fatal alerts still
+  fail the handshake.
+
 ## 0.3.3 - 2026-09-21
 
 - Pin the source checkout and conda lower bound to mojo-net 0.2.7.
