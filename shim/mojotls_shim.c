@@ -404,6 +404,13 @@ int mts_ssl_confirm_connect(void *s) {
             result = 0;
             continue;
         }
+        /* close_notify after a completed handshake is a clean EOF; the next
+         * SSL_read reports it again. Only a fatal alert rejects the
+         * session. */
+        if (error == SSL_ERROR_ZERO_RETURN) {
+            result = 0;
+            break;
+        }
         result = -error;
         break;
     }

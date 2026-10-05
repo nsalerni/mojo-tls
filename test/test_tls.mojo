@@ -227,6 +227,54 @@ def test_clean_eof() raises:
     _ = probe
 
 
+def test_clean_close_right_after_client_cert_handshake() raises:
+    # The client waits briefly for a post-handshake alert after presenting
+    # a certificate. A close_notify seen in that window is a clean EOF on
+    # an established stream, not a handshake failure. Whether it lands in
+    # that window is a race with the session tickets, so repeat.
+    comptime attempts = 50
+    var listener = TCPListener("127.0.0.1", 0)
+    var port = listener.local_port
+    var pid = external_call["fork", c_int]()
+    if pid == 0:
+        try:
+            var ctx = TLSContext.server(
+                SERVER_CERT,
+                SERVER_KEY,
+                client_ca_file=CA,
+                require_client_cert=True,
+            )
+            for _ in range(attempts):
+                var tcp = listener.accept()
+                try:
+                    var stream = ctx.accept(tcp^)
+                    stream.close()
+                except:
+                    pass
+        except:
+            pass
+        external_call["_exit", NoneType](c_int(0))
+    listener.close()
+
+    var ctx = TLSContext.client(
+        ca_file=String(CA),
+        cert_chain_pem=String(CLIENT_CERT),
+        key_pem=String(CLIENT_KEY),
+    )
+    try:
+        for _ in range(attempts):
+            var tcp = TCPStream.connect("127.0.0.1", port)
+            var stream = ctx.connect(tcp^, "localhost")
+            var buf = List[Byte](length=16, fill=0)
+            assert_equal(stream.read(buf), 0, "close_notify reads as clean EOF")
+            stream.close()
+    except error:
+        _ = external_call["kill", c_int](pid, c_int(9))
+        reap(pid)
+        raise error^
+    reap(pid)
+
+
 def test_reject_untrusted_ca() raises:
     var server = fork_tls_echo_server(
         SELFSIGNED_CERT, SELFSIGNED_KEY, List[String]()
@@ -723,6 +771,7 @@ def main() raises:
     test_required_client_certificate()
     test_reject_untrusted_client_certificate()
     test_clean_eof()
+    test_clean_close_right_after_client_cert_handshake()
     test_reject_untrusted_ca()
     test_reject_wrong_hostname()
     test_ip_literal_hostname()
