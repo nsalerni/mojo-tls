@@ -2,7 +2,7 @@
   "dir": ".deps",
   "deps": {
     "mojo-net": {
-      "ref": "v0.2.7"
+      "ref": "v0.2.8"
     }
   }
 }
