@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.4 - 2026-10-07
+
 - A verifying client ignores a TLS 1.3 session ticket unless its stored
   verification succeeded, the peer certificate is present and unexpired,
   and that certificate matches the connect name (hostname or IP literal;
@@ -12,6 +14,7 @@
   right after a handshake that presented a client certificate. The stream
   is returned and its first read reports a clean EOF. Fatal alerts still
   fail the handshake.
+- Conda/source pin lower-bounds mojo-net at 0.2.8.
 
 ## 0.3.3 - 2026-09-21
 
