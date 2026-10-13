@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.3.5 - 2026-10-13
+
 - Client hostname verification rejects partial wildcards
   (`www*.example.com`) and uses the subject common name only when the
   certificate has no DNS SAN, matching CPython and RFC 6125. A resumed
