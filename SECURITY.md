@@ -24,8 +24,11 @@ handshake then runs in full. Early data (0-RTT) is disabled. Encrypted
 PEM keys are rejected without a
 passphrase prompt on both the client identity path and server context
 construction. An IPv4 or IPv6 literal as the connect name verifies IP
-SANs and does not send SNI. An empty connect name still skips hostname
-verification (the chain is verified when `verify=True`).
+SANs and does not send SNI. A DNS name matches a DNS subject alternative
+name, or the subject common name only when the leaf has no DNS SAN.
+Partial wildcards such as `www*.example.com` do not match; a wildcard
+must be a whole label (`*.example.com`). An empty connect name still
+skips hostname verification (the chain is verified when `verify=True`).
 
 `$MOJO_TLS_SHIM` loads a caller-supplied shared library; treat that path
 as a trust boundary. Cipher-suite, OCSP, and CRL policy stay with the

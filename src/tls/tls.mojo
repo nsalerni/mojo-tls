@@ -351,15 +351,17 @@ struct TLSContext(Movable):
             sni: Server name for SNI and hostname verification; empty
                 skips both (the chain is still verified when the context
                 verifies). An IPv4 or IPv6 literal checks IP SANs and
-                does not send SNI.
+                does not send SNI. A DNS name matches a DNS SAN, or the
+                subject CN when the certificate has no DNS SAN. A wildcard
+                matches only as a whole label (`*.example.com`); a partial
+                wildcard such as `www*.example.com` does not match.
             session: Optional ticket from a previous `TLSStream.session()`.
                 When this context verifies peers, the ticket is kept only
                 if its stored verification succeeded, the peer certificate
                 is present and unexpired, and that certificate matches
-                `sni`. A hostname is checked as a DNS name and an IP
-                literal as an iPAddress SAN. An empty `sni` skips the name
-                check. A ticket that fails these checks is ignored and the
-                handshake is a full one. Early data is never sent.
+                `sni` under the same DNS and IP rules. An empty `sni` skips
+                the name check. A ticket that fails these checks is ignored
+                and the handshake is a full one. Early data is never sent.
 
         Returns:
             The established TLS stream.
@@ -389,13 +391,15 @@ struct TLSContext(Movable):
 
         Args:
             tcp: The connected stream; ownership is taken.
-            sni: Server name for SNI and hostname verification.
+            sni: Server name for SNI and hostname verification. DNS
+                matching follows `connect`: partial wildcards are rejected,
+                and the subject CN is used only when there is no DNS SAN.
             session: Optional ticket from a previous `TLSStream.session()`.
                 A verifying context keeps it only when the stored
                 verification succeeded, the peer certificate is present
-                and unexpired, and it matches `sni`. An empty `sni` skips
-                the name check. A ticket that fails these checks is
-                ignored and the handshake is a full one.
+                and unexpired, and it matches `sni` under those same rules.
+                An empty `sni` skips the name check. A ticket that fails
+                these checks is ignored and the handshake is a full one.
 
         Returns:
             A client handshake that advances with socket readiness.

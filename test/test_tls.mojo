@@ -28,6 +28,16 @@ comptime CLIENT_CERT = "build/certs/client-chain.pem"
 comptime CLIENT_KEY = "build/certs/client.key"
 comptime UNTRUSTED_CLIENT_CERT = "build/certs/untrusted_client.pem"
 comptime UNTRUSTED_CLIENT_KEY = "build/certs/untrusted_client.key"
+comptime PARTIAL_WILD_CERT = "build/certs/partial_wild.pem"
+comptime PARTIAL_WILD_KEY = "build/certs/partial_wild.key"
+comptime WILD_LABEL_CERT = "build/certs/wild_label.pem"
+comptime WILD_LABEL_KEY = "build/certs/wild_label.key"
+comptime CN_ONLY_CERT = "build/certs/cn_only.pem"
+comptime CN_ONLY_KEY = "build/certs/cn_only.key"
+comptime SAN_NOT_CN_CERT = "build/certs/san_not_cn.pem"
+comptime SAN_NOT_CN_KEY = "build/certs/san_not_cn.key"
+comptime PARTIAL_AND_EXACT_CERT = "build/certs/partial_and_exact.pem"
+comptime PARTIAL_AND_EXACT_KEY = "build/certs/partial_and_exact.key"
 comptime CLIENT_ENCRYPTED_KEY = "build/certs/client-encrypted.key"
 comptime MALFORMED_NUL_CERT = "build/certs/malformed_nul.pem"
 comptime MALFORMED_NUL_KEY = "build/certs/malformed_nul.key"
@@ -307,6 +317,78 @@ def test_reject_wrong_hostname() raises:
         assert_true("handshake" in String(e), String(e))
     assert_true(raised, "hostname mismatch must be rejected")
     reap(server[1])
+
+
+def expect_hostname_rejected(
+    cert: StringSpan, key: StringSpan, hostname: StringSpan
+) raises:
+    var server = fork_tls_echo_server(cert, key, List[String]())
+    var ctx = TLSContext.client(ca_file=String(CA))
+    var tcp = TCPStream.connect("127.0.0.1", server[0])
+    var raised = False
+    try:
+        _ = ctx.connect(tcp^, hostname)
+    except e:
+        raised = True
+        var message = String(e)
+        assert_true("handshake" in message, message)
+        assert_true("certificate verify failed" in message, message)
+    assert_true(raised, "hostname must be rejected: " + String(hostname))
+    reap(server[1])
+
+
+def expect_hostname_verified(
+    cert: StringSpan,
+    key: StringSpan,
+    hostname: StringSpan,
+    matched_name: StringSpan,
+) raises:
+    var server = fork_tls_echo_server(cert, key, List[String]())
+    var ctx = TLSContext.client(ca_file=String(CA))
+    var tcp = TCPStream.connect("127.0.0.1", server[0])
+    var stream = ctx.connect(tcp^, hostname)
+    var peer = stream.peer_certificate()
+    if not peer:
+        raise Error("verified handshake has no peer certificate")
+    var certificate = peer.value().copy()
+    assert_true(certificate.verified)
+    assert_equal(certificate.matched_name, String(matched_name))
+    stream.write_all("ok".as_bytes())
+    assert_equal(String(from_utf8=stream.read_exact(2)), "ok")
+    stream.close()
+    reap(server[1])
+
+
+def test_hostname_wildcard_and_common_name() raises:
+    # www*.example.test matches www1.example.test only as a partial
+    # wildcard, and that name is also the CN. Accepting it would mean
+    # partial wildcards are on, or the CN was checked despite a DNS SAN.
+    expect_hostname_rejected(
+        PARTIAL_WILD_CERT, PARTIAL_WILD_KEY, "www1.example.test"
+    )
+    # A whole-label wildcard still matches exactly one label. OpenSSL
+    # reports the certificate pattern as the matched name.
+    expect_hostname_verified(
+        WILD_LABEL_CERT,
+        WILD_LABEL_KEY,
+        "www.example.test",
+        "*.example.test",
+    )
+    expect_hostname_rejected(
+        WILD_LABEL_CERT, WILD_LABEL_KEY, "a.b.example.test"
+    )
+    # No DNS SAN: RFC 6125 still allows the subject CN.
+    expect_hostname_verified(
+        CN_ONLY_CERT, CN_ONLY_KEY, "localhost", "localhost"
+    )
+    # A DNS SAN suppresses a different CN, and the SAN itself matches.
+    expect_hostname_rejected(SAN_NOT_CN_CERT, SAN_NOT_CN_KEY, "localhost")
+    expect_hostname_verified(
+        SAN_NOT_CN_CERT,
+        SAN_NOT_CN_KEY,
+        "other.example.test",
+        "other.example.test",
+    )
 
 
 def test_ip_literal_hostname() raises:
@@ -835,6 +917,67 @@ def test_session_ticket_wrong_name_rejected() raises:
     reap(server[1])
 
 
+def test_session_ticket_partial_wildcard_rejected() raises:
+    # The leaf matches ok.example.test exactly and ok1.example.test only
+    # through the partial wildcard ok*.example.test. Resumption does not
+    # verify the certificate again, so the ticket check has to reject it.
+    var server = fork_two_echo_server(
+        PARTIAL_AND_EXACT_CERT, PARTIAL_AND_EXACT_KEY
+    )
+    var ctx = TLSContext.client(ca_file=String(CA))
+    var tcp = TCPStream.connect("127.0.0.1", server[0])
+    var stream = ctx.connect(tcp^, "ok.example.test")
+    stream.write_all("ping".as_bytes())
+    assert_equal(String(from_utf8=stream.read_exact(4)), "ping")
+    var ticket = take_ticket(stream)
+    stream.close()
+
+    var resume_tcp = TCPStream.connect("127.0.0.1", server[0])
+    var raised = False
+    try:
+        _ = ctx.connect(
+            resume_tcp^, "ok1.example.test", session=ticket.copy()
+        )
+    except e:
+        raised = True
+        var message = String(e)
+        assert_true("handshake" in message, message)
+        assert_true("certificate verify failed" in message, message)
+    assert_true(
+        raised,
+        "a partial wildcard must not resume a different name",
+    )
+    reap(server[1])
+
+
+def test_session_ticket_exact_name_with_partial_san_resumes() raises:
+    # A partial-wildcard SAN next to an exact name must not disable
+    # resumption of the exact name.
+    var server = fork_two_echo_server(
+        PARTIAL_AND_EXACT_CERT, PARTIAL_AND_EXACT_KEY
+    )
+    var ctx = TLSContext.client(ca_file=String(CA))
+    var tcp = TCPStream.connect("127.0.0.1", server[0])
+    var stream = ctx.connect(tcp^, "ok.example.test")
+    stream.write_all("ping".as_bytes())
+    assert_equal(String(from_utf8=stream.read_exact(4)), "ping")
+    var ticket = take_ticket(stream)
+    stream.close()
+
+    var resume_tcp = TCPStream.connect("127.0.0.1", server[0])
+    var resumed = ctx.connect(
+        resume_tcp^, "ok.example.test", session=ticket.copy()
+    )
+    assert_true(
+        resumed.session_reused(),
+        "exact name still resumes when the leaf also has a partial wildcard",
+    )
+    resumed.write_all("pong".as_bytes())
+    assert_equal(String(from_utf8=resumed.read_exact(4)), "pong")
+    resumed.close()
+    reap(server[1])
+
+
 def test_session_ticket_unverified_rejected() raises:
     var server = fork_two_echo_server(SELFSIGNED_CERT, SELFSIGNED_KEY)
     var unverified = TLSContext.client(verify=False)
@@ -888,6 +1031,7 @@ def main() raises:
     test_clean_close_right_after_client_cert_handshake()
     test_reject_untrusted_ca()
     test_reject_wrong_hostname()
+    test_hostname_wildcard_and_common_name()
     test_ip_literal_hostname()
     test_verify_disabled_accepts_selfsigned()
     test_reject_unsafe_subject_alt_names()
@@ -901,6 +1045,8 @@ def main() raises:
     test_session_ticket_resume()
     test_session_ticket_ip_literal_resume()
     test_session_ticket_wrong_name_rejected()
+    test_session_ticket_partial_wildcard_rejected()
+    test_session_ticket_exact_name_with_partial_san_resumes()
     test_session_ticket_unverified_rejected()
     test_write_timeout_after_wrap()
     print("test_tls: all tests passed")
