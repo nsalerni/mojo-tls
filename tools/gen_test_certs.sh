@@ -3,6 +3,11 @@
 #   ca.pem/ca.key            a throwaway test CA
 #   server.pem/server.key    CA-signed, SAN localhost + 127.0.0.1
 #   wronghost.pem/.key       CA-signed, SAN otherhost.example only
+#   partial_wild.pem/.key    partial-wildcard SAN www*.example.test
+#   wild_label.pem/.key      whole-label wildcard SAN *.example.test
+#   cn_only.pem/.key         CN localhost and no subjectAltName
+#   san_not_cn.pem/.key      DNS SAN other.example.test, CN localhost
+#   partial_and_exact.pem/.key  exact SAN plus a partial wildcard
 #   selfsigned.pem/.key      not signed by the CA
 #   client_intermediate.pem/.key  intermediate CA signed by the root
 #   client.pem/client.key    client authentication leaf
@@ -22,6 +27,9 @@ required=(
   client_intermediate.pem client_intermediate.key client-encrypted.key
   other_ca.pem other_ca.key untrusted_client.pem untrusted_client.key
   malformed_nul.pem malformed_nul.key malformed_lf.pem malformed_lf.key
+  partial_wild.pem partial_wild.key wild_label.pem wild_label.key
+  cn_only.pem cn_only.key san_not_cn.pem san_not_cn.key
+  partial_and_exact.pem partial_and_exact.key
   malformed_high.pem malformed_high.key malformed_ip.pem malformed_ip.key
   oversized_san_value.pem oversized_san_value.key
   empty_san.pem empty_san.key
@@ -83,6 +91,14 @@ make_ca other_ca "/CN=mojo-tls untrusted test CA"
 issue server "/CN=localhost" ca serverAuth \
   "DNS:localhost,DNS:service.example.test,IP:127.0.0.1,IP:2001:db8::1,URI:spiffe://example.test/server,email:server@example.test,RID:1.2.3.4"
 issue wronghost "/CN=otherhost.example" ca serverAuth "DNS:otherhost.example"
+issue partial_wild "/CN=www1.example.test" ca serverAuth \
+  "DNS:www*.example.test"
+issue wild_label "/CN=wildcard.example.test" ca serverAuth \
+  "DNS:*.example.test"
+issue cn_only "/CN=localhost" ca serverAuth
+issue san_not_cn "/CN=localhost" ca serverAuth "DNS:other.example.test"
+issue partial_and_exact "/CN=partial-and-exact" ca serverAuth \
+  "DNS:ok.example.test,DNS:ok*.example.test"
 issue_intermediate client_intermediate "/CN=mojo-tls client intermediate" ca
 issue client "/CN=mojo-tls test client" client_intermediate clientAuth \
   "DNS:client.example.test,IP:192.0.2.44,IP:2001:db8::44,URI:spiffe://example.test/client,email:client@example.test"

@@ -318,6 +318,14 @@ void *mts_ssl_new(void *p, int fd) {
     return s;
 }
 
+/* CPython's default host flags. A whole-label wildcard ("*.example.com")
+ * matches one label. A partial wildcard ("www*.example.com") does not.
+ * The subject CN is a fallback only when the leaf has no DNS SAN:
+ * ALWAYS_CHECK_SUBJECT and NEVER_CHECK_SUBJECT stay off. SSL_set1_host
+ * leaves these flags at zero, so both the handshake and the ticket name
+ * check set them explicitly. */
+#define MTS_HOST_FLAGS X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS
+
 /* sni also enables RFC 6125 hostname verification against the peer
  * certificate; pass an empty string to skip both. This is separate from
  * SSL_connect because a nonblocking handshake configures the name once. */
@@ -326,16 +334,18 @@ int mts_ssl_set_connect_name(void *s, const char *sni) {
     if (sni && sni[0]) {
         struct in_addr v4;
         struct in6_addr v6;
+        X509_VERIFY_PARAM *param = SSL_get0_param(ssl);
+        if (!param) return -1;
         if (inet_pton(AF_INET, sni, &v4) == 1 ||
             inet_pton(AF_INET6, sni, &v6) == 1) {
             /* RFC 6066: SNI is a DNS name. Verify IP SANs instead. */
-            X509_VERIFY_PARAM *param = SSL_get0_param(ssl);
-            if (!param || X509_VERIFY_PARAM_set1_ip_asc(param, sni) != 1)
-                return -1;
+            if (X509_VERIFY_PARAM_set1_ip_asc(param, sni) != 1) return -1;
             return 0;
         }
         if (SSL_set_tlsext_host_name(ssl, sni) != 1) return -1;
         if (SSL_set1_host(ssl, sni) != 1) return -1;
+        /* After SSL_set1_host, which does not install host flags. */
+        X509_VERIFY_PARAM_set_hostflags(param, MTS_HOST_FLAGS);
     }
     return 0;
 }
@@ -549,13 +559,14 @@ static int mts_peer_cert_is_current(const X509 *cert) {
     return X509_cmp_current_time(not_after) == 1;
 }
 
-/* Flag 0 is SSL_set1_host's default. An empty name skips the name check,
- * matching mts_ssl_set_connect_name. IP literals match iPAddress SANs. */
+/* Same rules as mts_ssl_set_connect_name. An empty name skips the name
+ * check. IP literals match iPAddress SANs and do not use host flags. */
 static int mts_peer_cert_matches_name(X509 *cert, const char *name) {
     if (!name || name[0] == '\0') return 1;
     if (mts_name_is_ip_literal(name))
         return X509_check_ip_asc(cert, name, 0) == 1;
-    return X509_check_host(cert, name, strlen(name), 0, NULL) == 1;
+    return X509_check_host(cert, name, strlen(name), MTS_HOST_FLAGS, NULL) ==
+           1;
 }
 
 static int mts_session_peer_ok(SSL_SESSION *sess, const char *name) {

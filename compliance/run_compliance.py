@@ -63,6 +63,8 @@ EXPECTED_TLS_CHECKS = (
     "CPython verifying client vs mojo server: chain, hostname, ALPN, echo",
     "both reject an untrusted (self-signed) certificate",
     "both reject a hostname mismatch on a CA-signed certificate",
+    "both reject a partial-wildcard DNS name",
+    "both accept a single-label wildcard DNS name",
     "ALPN no overlap: our server alerts fatally, our client tolerates a server that proceeds without",
     "nonblocking Mojo handshake matches CPython TLS and ALPN",
     "partial Mojo TLS writes match CPython",
@@ -958,6 +960,88 @@ def py_stalled_tls_server(ctx, results: dict):
     return thread
 
 
+def hostname_verification_agrees(
+    cert: str, key: str, hostname: str, *, accept: bool
+) -> tuple[bool, str]:
+    """Compare CPython and Mojo hostname verification for one leaf."""
+    proc = subprocess.Popen(
+        [
+            *MOJO_RUN,
+            str(TOOLS / "tls_echo_server.mojo"),
+            str(CERTS / cert),
+            str(CERTS / key),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=ROOT,
+    )
+    py_accepted = False
+    py_rejected = False
+    py_detail = ""
+    try:
+        try:
+            port_line = read_process_line(proc)
+        except (TimeoutError, ValueError) as error:
+            py_detail = repr(error)
+            port_line = ""
+        if port_line.startswith("PORT "):
+            port = int(port_line.removeprefix("PORT "))
+            raw = None
+            tls = None
+            try:
+                context = ssl.create_default_context(
+                    cafile=str(CERTS / "ca.pem")
+                )
+                raw = socket.create_connection(("127.0.0.1", port), timeout=10)
+                tls = context.wrap_socket(raw, server_hostname=hostname)
+                raw = None
+                tls.settimeout(10)
+                tls.sendall(b"ping")
+                py_accepted = tls.recv(4) == b"ping"
+            except ssl.SSLCertVerificationError as error:
+                py_rejected = True
+                py_detail = str(error)
+            except Exception as error:
+                py_detail = repr(error)
+            finally:
+                if tls is not None:
+                    tls.close()
+                elif raw is not None:
+                    raw.close()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+
+    results: dict = {"ready": threading.Event()}
+    thread = py_echo_server(py_server_ctx(cert, key, ["h2"]), results)
+    results["ready"].wait(10)
+    mojo = run_tool(
+        "tls_probe_client",
+        results["port"],
+        hostname,
+        str(CERTS / "ca.pem"),
+        "-",
+        4,
+        timeout=60,
+    )
+    thread.join(timeout=30)
+    mojo_output = mojo.stderr + mojo.stdout
+    mojo_accepted = mojo.returncode == 0 and "OK 4" in mojo.stdout
+    mojo_rejected = mojo.returncode != 0 and "handshake" in mojo_output.lower()
+    if accept:
+        ok = py_accepted and mojo_accepted
+    else:
+        ok = py_rejected and mojo_rejected
+    detail = (
+        f"python_accepted={py_accepted} python_rejected={py_rejected} "
+        f"mojo_accepted={mojo_accepted} mojo_rejected={mojo_rejected} "
+        f"python={py_detail!r} mojo_err={mojo.stderr[:150]!r}"
+    )
+    return ok, detail
+
+
 def section_tls():
     print("== tls vs CPython ssl ==")
     n = 262_144
@@ -1445,6 +1529,35 @@ def section_tls():
     record("tls", "both reject a hostname mismatch on a CA-signed certificate",
            py_rejected and mojo_rejected,
            f"python={py_rejected} mojo={mojo_rejected} err={r.stderr[:120]!r}")
+
+    # www*.example.test covers www1.example.test only as a partial wildcard.
+    # CPython rejects that pattern; the handshake must agree.
+    partial_ok, partial_detail = hostname_verification_agrees(
+        "partial_wild.pem",
+        "partial_wild.key",
+        "www1.example.test",
+        accept=False,
+    )
+    record(
+        "tls",
+        "both reject a partial-wildcard DNS name",
+        partial_ok,
+        partial_detail,
+    )
+    # *.example.test still covers one label. Rejecting it would be stricter
+    # than CPython.
+    wildcard_ok, wildcard_detail = hostname_verification_agrees(
+        "wild_label.pem",
+        "wild_label.key",
+        "www.example.test",
+        accept=True,
+    )
+    record(
+        "tls",
+        "both accept a single-label wildcard DNS name",
+        wildcard_ok,
+        wildcard_detail,
+    )
 
     # ALPN with no overlap: RFC 7301 permits either a fatal alert or
     # proceeding without a protocol. Our server sends the alert (which a
